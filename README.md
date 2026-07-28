@@ -74,17 +74,25 @@ Quarkus 3 / Java 21, hexagonal:
 The eventual deployment target is AWS Lambda (Quarkus native image), which is why the core
 stays framework-light and storage sits behind ports.
 
-## Running locally
+## Running from a fresh checkout
 
-Requires JDK 21 and Maven, plus an Anthropic API key.
+The only prerequisite is **JDK 21** — the Maven wrapper downloads Maven itself.
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."   # or set as a user environment variable
-mvn quarkus:dev                          # dev mode, or:
-mvn package -DskipTests && java -jar target\quarkus-app\quarkus-run.jar
+git clone https://github.com/edtice-goog/CustomerRelationshipManagement.git
+cd CustomerRelationshipManagement
+$env:ANTHROPIC_API_KEY = "sk-ant-..."    # or set as a user environment variable
+.\mvnw.cmd package -DskipTests           # (Linux/macOS: ./mvnw package -DskipTests)
+java -jar target\quarkus-app\quarkus-run.jar
 ```
 
 Then open http://localhost:8080 (UI) or http://localhost:8080/q/swagger-ui (API).
+
+A fresh checkout starts with an **empty database** — `data/crm.db` is created with the full schema
+on first startup and is never committed, so each deployment's data stays on its own machine.
+`ANTHROPIC_API_KEY` is the server-default key; callers can still pass a different key per request
+(see `INGESTION.md`), but the server key is also used by the scheduled housekeeping sweep, so set it
+even when all ingestion traffic carries its own key.
 
 Configuration lives in `src/main/resources/application.properties`
 (`crm.db.url`, `crm.extraction.model`, `crm.autoPromoteThreshold`).
