@@ -25,10 +25,20 @@ sentiment, commitments, and support-case status are extracted automatically by C
   sentiment, interaction summaries, and commitments ("I'll send X by Friday").
 - **Promotion**: observations ≥ threshold confidence go live; the rest wait in a one-click
   review queue.
-- **Support case tracking** (not ticket management): SalesForce `ref:...:ref` tokens are
-  recognized at ingest; emails are mapped to cases; on every new case email the full history
-  is re-assessed on three tracks — customer disposition, technical progress, and whether work
-  is reaching the **root cause** — plus an overall green/yellow/red health.
+- **Activity tracking** (support cases, evaluations, relationship work — one structure):
+  documents map to activities; on every new related communication the full history is
+  re-assessed on three tracks — customer disposition, substantive progress, and whether work
+  addresses the customer's **underlying need** — plus an overall green/yellow/red health.
+  Support cases are recognized deterministically from SalesForce `ref:...:ref` tokens at
+  ingest; evaluations are model-detected during extraction and anchored to the customer org.
+- **The next-step rule**: an open activity with no active linked commitment automatically
+  gets an implicit commitment — owed by the CRM owner, due immediately — to set a next step.
+  Nothing open can silently stall. Extracted commitments from an activity's emails link to
+  the activity and satisfy the rule.
+- **Generic opportunity anchors** (deliberately not opportunity management): a GUID plus
+  external-system metadata, or a local key-value attribute bag for users without an external
+  system. Activities link to opportunities; anything richer belongs in a real opportunity
+  system.
 - **Machine-facing API** with OpenAPI description (`/q/openapi`, Swagger UI at `/q/swagger-ui`)
   so agents (e.g. Copilot) can drive ingestion. Callers may supply their own Claude API key and
   endpoint per request (e.g. a corporate key with different data-protection terms); keys are

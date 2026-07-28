@@ -3,13 +3,14 @@ package com.edtice.crm.store;
 import com.edtice.crm.domain.Observation;
 import com.edtice.crm.domain.ObservationStatus;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
 public interface ObservationStore {
 
     Observation insert(long entityId, String attribute, String value, double confidence,
-                       String evidence, Long sourceDocId, ObservationStatus status);
+                       String evidence, Long sourceDocId, Long activityId, ObservationStatus status);
 
     Optional<Observation> byId(long id);
 
@@ -27,5 +28,11 @@ public interface ObservationStore {
     void setStatus(long id, ObservationStatus status);
 
     /** When this entity last gained an observation — used to decide whether a settled housekeeping question has new evidence. */
-    java.util.Optional<java.time.Instant> latestObservedAt(long entityId);
+    Optional<Instant> latestObservedAt(long entityId);
+
+    /** Active commitment observations linked to an activity, newest first. */
+    List<Observation> commitmentsForActivity(long activityId);
+
+    /** True when the activity has at least one active commitment — its "next step". */
+    boolean activeCommitmentExists(long activityId);
 }

@@ -1,6 +1,6 @@
 package com.edtice.crm.ingest;
 
-import com.edtice.crm.cases.CaseService;
+import com.edtice.crm.activities.ActivityService;
 import com.edtice.crm.domain.SourceDocument;
 import com.edtice.crm.extract.ApiCredentials;
 import com.edtice.crm.pipeline.PipelineService;
@@ -24,18 +24,19 @@ public class IngestService {
 
     private final StagingStore staging;
     private final PipelineService pipeline;
-    private final CaseService caseService;
+    private final ActivityService activityService;
     private final ObjectMapper mapper;
 
-    IngestService(StagingStore staging, PipelineService pipeline, CaseService caseService, ObjectMapper mapper) {
+    IngestService(StagingStore staging, PipelineService pipeline, ActivityService activityService,
+                  ObjectMapper mapper) {
         this.staging = staging;
         this.pipeline = pipeline;
-        this.caseService = caseService;
+        this.activityService = activityService;
         this.mapper = mapper;
     }
 
-    /** A newly staged document plus, when a ticket token was recognized, its case linkage. */
-    public record IngestOutcome(SourceDocument doc, Optional<CaseService.CaseInfo> caseInfo) {
+    /** A newly staged document plus, when a ticket token was recognized, its support-activity linkage. */
+    public record IngestOutcome(SourceDocument doc, Optional<ActivityService.ActivityInfo> activityInfo) {
     }
 
     /** Stage a manually pasted communication and kick off extraction. Returns empty if it was already ingested. */
@@ -57,11 +58,13 @@ public class IngestService {
         if (doc.isEmpty()) {
             return Optional.empty();
         }
-        // Case linkage is deterministic and instant, so it happens synchronously here —
-        // before extraction — and the caller gets tracking info in the ingest response.
-        Optional<CaseService.CaseInfo> caseInfo = caseService.register(doc.get());
+        // Support-activity linkage is deterministic and instant, so it happens
+        // synchronously here — before extraction — and the caller gets tracking
+        // info in the ingest response. Evaluation linkage is model-signaled and
+        // happens during extraction.
+        Optional<ActivityService.ActivityInfo> activityInfo = activityService.registerSupport(doc.get());
         pipeline.submit(doc.get().id(), credentials);
-        return Optional.of(new IngestOutcome(doc.get(), caseInfo));
+        return Optional.of(new IngestOutcome(doc.get(), activityInfo));
     }
 
     public static String contentHash(String content) {

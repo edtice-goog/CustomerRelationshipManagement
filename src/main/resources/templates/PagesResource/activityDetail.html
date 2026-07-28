@@ -1,0 +1,106 @@
+{#include base}
+{#title}{activity.displayLabel} — Customer Success CRM{/title}
+
+<div class="card">
+  <h1>{activity.displayLabel}
+    {#if current}<span class="pill {current.health}" style="vertical-align:middle">{current.health}</span>{/if}
+    <span class="pill {activity.state.db}" style="vertical-align:middle">{activity.state.db}</span>
+  </h1>
+  <p>
+    <span class="muted">Kind:</span> {activity.kindLabel}
+    {#if anchorName} &nbsp;<span class="muted">Customer:</span> <a href="/entity/{activity.primaryEntityId}">{anchorName}</a>{/if}
+    {#if activity.reference} &nbsp;<span class="muted">Ref:</span> {activity.reference}{/if}
+  </p>
+  {#if activity.token}<p class="mono muted">{activity.token}</p>{/if}
+  {#if activity.state.db == 'open'}
+  <form class="inline" method="post" action="/activity/{activity.id}/close">
+    <button class="ghost" type="submit">Close activity</button>
+  </form>
+  {#else}
+  <form class="inline" method="post" action="/activity/{activity.id}/reopen">
+    <button class="ghost" type="submit">Reopen</button>
+  </form>
+  {/if}
+</div>
+
+{#if current}
+<div class="card">
+  <h2>Current status <span class="muted" style="font-weight:normal">— as of {current.assessedAt}</span></h2>
+  <p>{current.summary}</p>
+  <table>
+    <tr><th style="width:11rem">Track</th><th style="width:9rem">State</th><th>Notes</th></tr>
+    <tr>
+      <td>Customer disposition</td>
+      <td><strong>{current.disposition}</strong></td>
+      <td>{current.dispositionNotes}</td>
+    </tr>
+    <tr>
+      <td>Progress</td>
+      <td><strong>{current.technical}</strong></td>
+      <td>{current.technicalNotes}</td>
+    </tr>
+    <tr>
+      <td>Underlying need</td>
+      <td><strong>{current.rootCause}</strong></td>
+      <td>{current.rootCauseNotes}</td>
+    </tr>
+  </table>
+</div>
+{#else}
+<div class="card"><p class="muted">No assessment yet — it is generated when a related communication finishes extraction.</p></div>
+{/if}
+
+<div class="card">
+  <h2>Commitments (next steps)</h2>
+  {#if commitments.isEmpty()}
+  <p class="muted">No active commitments — if this activity is open, an implicit next-step commitment
+    will be generated automatically.</p>
+  {#else}
+  <table>
+    <tr><th>Owed by</th><th>Commitment</th><th>Source</th></tr>
+    {#for cm in commitments}
+    <tr>
+      <td><a href="/entity/{cm.owedByEntityId}">{cm.owedByName}</a></td>
+      <td>{cm.value} {#if cm.implicit}<span class="pill open">implicit</span>{/if}</td>
+      <td>{#if cm.sourceDocId}<a href="/source/{cm.sourceDocId}">source #{cm.sourceDocId}</a>{#else}<span class="muted">next-step rule</span>{/if}</td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+<div class="card">
+  <h2>Communications ({docs.size})</h2>
+  <table>
+    <tr><th>#</th><th>Preview</th><th>Ingested</th><th>Status</th></tr>
+    {#for d in docs}
+    <tr>
+      <td><a href="/source/{d.id}">{d.id}</a></td>
+      <td class="mono">{d.preview}</td>
+      <td class="muted">{d.receivedAt}</td>
+      <td><span class="pill {d.status.db}">{d.status.db}</span></td>
+    </tr>
+    {/for}
+  </table>
+</div>
+
+{#if history.size > 1}
+<div class="card">
+  <h2>Assessment history</h2>
+  <table>
+    <tr><th>When</th><th>Health</th><th>Disposition</th><th>Progress</th><th>Underlying need</th><th>Summary</th></tr>
+    {#for a in history}
+    <tr>
+      <td class="muted">{a.assessedAt}</td>
+      <td><span class="pill {a.health}">{a.health}</span></td>
+      <td>{a.disposition}</td>
+      <td>{a.technical}</td>
+      <td>{a.rootCause}</td>
+      <td>{a.summary}</td>
+    </tr>
+    {/for}
+  </table>
+</div>
+{/if}
+
+{/include}

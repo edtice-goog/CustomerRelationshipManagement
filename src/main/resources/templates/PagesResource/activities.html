@@ -1,0 +1,32 @@
+{#include base}
+{#title}Activities — Customer Success CRM{/title}
+
+<div class="card">
+  <h1>Activities</h1>
+  <p class="muted">Support cases, evaluations, and relationship work — one structure, recalculated
+    from full history on every new communication. An open activity with no committed next step
+    gets an implicit commitment automatically (the ✔/✘ column).</p>
+  {#if rows.isEmpty()}
+  <p class="muted">No activities tracked yet. Support cases start from ticket tokens; evaluations
+    are detected automatically from communication content.</p>
+  {#else}
+  <table>
+    <tr><th>Activity</th><th>Kind</th><th>Customer</th><th>Docs</th><th>Health</th><th>Disposition</th><th>Next step</th><th>State</th><th>Updated</th></tr>
+    {#for a in rows}
+    <tr>
+      <td><a href="/activity/{a.id}">{a.label}</a></td>
+      <td>{a.kindLabel}</td>
+      <td>{a.anchorName}</td>
+      <td>{a.docCount}</td>
+      <td><span class="pill {a.health}">{a.health}</span></td>
+      <td>{a.disposition}</td>
+      <td>{#if a.hasNextStep}✔{#else}<span style="color:var(--bad)">✘</span>{/if}</td>
+      <td><span class="pill {a.state}">{a.state}</span></td>
+      <td class="muted">{a.updated}</td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+{/include}

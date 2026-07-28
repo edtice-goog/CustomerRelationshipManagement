@@ -1,6 +1,7 @@
 package com.edtice.crm.pipeline;
 
-import com.edtice.crm.cases.CaseService;
+import com.edtice.crm.activities.ActivityService;
+import com.edtice.crm.domain.Activity;
 import com.edtice.crm.domain.DocStatus;
 import com.edtice.crm.domain.Entity;
 import com.edtice.crm.domain.ObservationStatus;
@@ -29,8 +30,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Drives a staged document through extraction, entity resolution, and promotion.
- * High-confidence observations go live immediately; the rest wait in the review queue.
+ * Drives a staged document through extraction, entity resolution, activity
+ * linkage, and promotion. High-confidence observations go live immediately;
+ * the rest wait in the review queue.
  */
 @ApplicationScoped
 public class PipelineService {
@@ -42,7 +44,7 @@ public class PipelineService {
     private final ObservationStore observations;
     private final RelationshipStore relationships;
     private final Extractor extractor;
-    private final CaseService caseService;
+    private final ActivityService activityService;
     private final HousekeepingService housekeeping;
     private final double autoPromoteThreshold;
 
@@ -52,8 +54,15 @@ public class PipelineService {
         return t;
     });
 
+    /**
+     * Per-document credentials for in-flight jobs. In-memory only: keys are never
+     * persisted, and after a restart a reprocess falls back to the server default
+     * unless credentials are supplied again.
+     */
+    private final ConcurrentHashMap<Long, ApiCredentials> jobCredentials = new ConcurrentHashMap<>();
+
     PipelineService(StagingStore staging, EntityStore entities, ObservationStore observations,
-                    RelationshipStore relationships, Extractor extractor, CaseService caseService,
+                    RelationshipStore relationships, Extractor extractor, ActivityService activityService,
                     HousekeepingService housekeeping,
                     @ConfigProperty(name = "crm.autoPromoteThreshold") double autoPromoteThreshold) {
         this.staging = staging;
@@ -61,17 +70,10 @@ public class PipelineService {
         this.observations = observations;
         this.relationships = relationships;
         this.extractor = extractor;
-        this.caseService = caseService;
+        this.activityService = activityService;
         this.housekeeping = housekeeping;
         this.autoPromoteThreshold = autoPromoteThreshold;
     }
-
-    /**
-     * Per-document credentials for in-flight jobs. In-memory only: keys are never
-     * persisted, and after a restart a reprocess falls back to the server default
-     * unless credentials are supplied again.
-     */
-    private final ConcurrentHashMap<Long, ApiCredentials> jobCredentials = new ConcurrentHashMap<>();
 
     /** Queue a staged document for background extraction with the server-default credentials. */
     public void submit(long docId) {
@@ -102,6 +104,8 @@ public class PipelineService {
 
         MessageAnalysis analysis = extractor.analyze(doc, jobCredentials.get(docId));
         List<Entity> createdEntities = new ArrayList<>();
+        Entity primaryOrg = null;
+        Entity primaryPerson = null;
 
         // Organizations first so people can link to them.
         if (analysis.organizations() != null) {
@@ -110,12 +114,14 @@ public class PipelineService {
                     continue;
                 }
                 Entity orgEntity = resolveOrCreate(Entity.ORGANIZATION, org.name(), createdEntities);
-                record(orgEntity.id(), "website", org.website(), org.confidence(), org.evidence(), docId);
+                if (primaryOrg == null) {
+                    primaryOrg = orgEntity;
+                }
+                record(orgEntity.id(), "website", org.website(), org.confidence(), org.evidence(), docId, null);
             }
         }
 
         Map<String, Long> peopleByName = new HashMap<>();
-        Long primaryEntityId = null;
         boolean first = true;
         if (analysis.people() != null) {
             for (MessageAnalysis.ExtractedPerson person : analysis.people()) {
@@ -126,32 +132,46 @@ public class PipelineService {
                 if (!isBlank(person.fullName())) {
                     peopleByName.putIfAbsent(person.fullName().toLowerCase(), personEntity.id());
                 }
-                if (primaryEntityId == null) {
-                    primaryEntityId = personEntity.id();
+                if (primaryPerson == null) {
+                    primaryPerson = personEntity;
                 }
-                record(personEntity.id(), "email", person.email(), person.confidence(), person.evidence(), docId);
-                record(personEntity.id(), "phone", person.phone(), person.confidence(), person.evidence(), docId);
-                record(personEntity.id(), "title", person.title(), person.confidence(), person.evidence(), docId);
-                record(personEntity.id(), "company", person.company(), person.confidence(), person.evidence(), docId);
-                record(personEntity.id(), "address", person.address(), person.confidence(), person.evidence(), docId);
+                record(personEntity.id(), "email", person.email(), person.confidence(), person.evidence(), docId, null);
+                record(personEntity.id(), "phone", person.phone(), person.confidence(), person.evidence(), docId, null);
+                record(personEntity.id(), "title", person.title(), person.confidence(), person.evidence(), docId, null);
+                record(personEntity.id(), "company", person.company(), person.confidence(), person.evidence(), docId, null);
+                record(personEntity.id(), "address", person.address(), person.confidence(), person.evidence(), docId, null);
 
                 if (!isBlank(person.company())) {
                     Entity orgEntity = resolveOrCreate(Entity.ORGANIZATION, person.company(), createdEntities);
+                    if (primaryOrg == null) {
+                        primaryOrg = orgEntity;
+                    }
                     relationships.ensure(personEntity.id(), orgEntity.id(), Relationship.WORKS_AT, docId);
                 }
 
                 // Sentiment and summary describe the interaction; attach them to the
                 // primary correspondent so health signals accrue per customer.
                 if (first) {
-                    record(personEntity.id(), "sentiment", analysis.sentiment(), 1.0, analysis.summary(), docId);
-                    record(personEntity.id(), "interaction_summary", analysis.summary(), 1.0, null, docId);
+                    record(personEntity.id(), "sentiment", analysis.sentiment(), 1.0, analysis.summary(), docId, null);
+                    record(personEntity.id(), "interaction_summary", analysis.summary(), 1.0, null, docId, null);
                     first = false;
                 }
             }
         }
 
-        // Commitments attach to the person who owes them; fall back to any known
-        // entity with that name, then to the primary correspondent.
+        // Evaluation registration (model-signaled) — support registration already
+        // happened deterministically at ingest. Must precede commitment recording
+        // so commitments can link to the activity.
+        try {
+            activityService.registerEvaluation(doc, analysis, primaryOrg, primaryPerson);
+        } catch (Exception e) {
+            LOG.warnf(e, "Evaluation registration failed for document %d", docId);
+        }
+        List<Activity> docActivities = activityService.activitiesForDocument(docId);
+        Long commitmentActivityId = docActivities.isEmpty() ? null : docActivities.get(0).id();
+
+        // Commitments attach to the person who owes them and, when this document
+        // belongs to an activity, to that activity — its committed next step.
         if (analysis.commitments() != null) {
             for (MessageAnalysis.ExtractedCommitment commitment : analysis.commitments()) {
                 if (isBlank(commitment.description())) {
@@ -166,7 +186,7 @@ public class PipelineService {
                     }
                 }
                 if (owner == null) {
-                    owner = primaryEntityId;
+                    owner = primaryPerson == null ? null : primaryPerson.id();
                 }
                 if (owner == null) {
                     LOG.warnf("Skipping commitment with no attributable owner in document %d: %s",
@@ -181,7 +201,7 @@ public class PipelineService {
                     value.append(" (to ").append(commitment.owedTo()).append(")");
                 }
                 record(owner, "commitment", value.toString(), commitment.confidence(),
-                        commitment.evidence(), docId);
+                        commitment.evidence(), docId, commitmentActivityId);
             }
         }
 
@@ -197,25 +217,31 @@ public class PipelineService {
             }
         }
 
-        // If this email belongs to a tracked support case, recalculate the case
-        // status from the full history so the current assessment is always on hand.
-        try {
-            var supportCase = caseService.caseForDocument(docId);
-            if (supportCase.isPresent()) {
-                caseService.reassess(supportCase.get().id(), docId, jobCredentials.get(docId));
+        // Reassess every activity this document belongs to, then enforce the
+        // next-step rule: an open activity with no committed next step gets an
+        // implicit commitment due immediately.
+        String assessmentError = null;
+        for (Activity activity : docActivities) {
+            try {
+                activityService.reassess(activity.id(), docId, jobCredentials.get(docId));
+            } catch (Exception e) {
+                LOG.errorf(e, "Assessment failed for activity %d (document %d)", activity.id(), docId);
+                assessmentError = "Extraction succeeded, but assessment of "
+                        + activity.displayLabel() + " failed: " + e.getMessage();
             }
-        } catch (Exception e) {
-            LOG.errorf(e, "Case assessment failed for document %d", docId);
-            staging.setStatus(docId, DocStatus.EXTRACTED,
-                    "Contact extraction succeeded, but case assessment failed: " + e.getMessage());
-            return;
+            try {
+                activityService.ensureNextStep(activity);
+            } catch (Exception e) {
+                LOG.errorf(e, "Next-step check failed for activity %d", activity.id());
+            }
         }
 
-        staging.setStatus(docId, DocStatus.EXTRACTED, null);
-        LOG.infof("Extracted document %d: %d people, %d organizations, %d commitments", docId,
+        staging.setStatus(docId, DocStatus.EXTRACTED, assessmentError);
+        LOG.infof("Extracted document %d: %d people, %d organizations, %d commitments, %d activities", docId,
                 analysis.people() == null ? 0 : analysis.people().size(),
                 analysis.organizations() == null ? 0 : analysis.organizations().size(),
-                analysis.commitments() == null ? 0 : analysis.commitments().size());
+                analysis.commitments() == null ? 0 : analysis.commitments().size(),
+                docActivities.size());
     }
 
     private Entity resolvePerson(MessageAnalysis.ExtractedPerson person, List<Entity> createdSink) {
@@ -240,14 +266,14 @@ public class PipelineService {
     }
 
     private void record(long entityId, String attribute, String value, double confidence,
-                        String evidence, long docId) {
+                        String evidence, long docId, Long activityId) {
         if (isBlank(value) || observations.duplicateExists(entityId, attribute, value)) {
             return;
         }
         ObservationStatus status = confidence >= autoPromoteThreshold
                 ? ObservationStatus.ACTIVE
                 : ObservationStatus.PENDING_REVIEW;
-        observations.insert(entityId, attribute, value.strip(), confidence, evidence, docId, status);
+        observations.insert(entityId, attribute, value.strip(), confidence, evidence, docId, activityId, status);
     }
 
     private static boolean isBlank(String s) {

@@ -18,7 +18,9 @@ public record MessageAnalysis(
         @JsonPropertyDescription("Overall sentiment of the communication from the customer's perspective: positive, neutral, or negative.")
         String sentiment,
         @JsonPropertyDescription("One-sentence summary of what this communication is about.")
-        String summary) {
+        String summary,
+        @JsonPropertyDescription("Signal for whether this communication is part of a prospect's evaluation of our product or service.")
+        EvaluationSignal evaluationSignal) {
 
     public record ExtractedPerson(
             @JsonPropertyDescription("Full name. Empty string if unknown.")
@@ -51,6 +53,17 @@ public record MessageAnalysis(
             @JsonPropertyDescription("Confidence 0.0-1.0 that this is a real commitment, correctly attributed.")
             double confidence,
             @JsonPropertyDescription("Short verbatim quote from the message containing the commitment.")
+            String evidence) {
+    }
+
+    public record EvaluationSignal(
+            @JsonPropertyDescription("True when this communication is part of a prospective customer evaluating our product/service: demo requests, trials, proofs of concept, technical validation, purchase evaluation. False for routine support of an existing deployment and ordinary relationship correspondence.")
+            boolean partOfEvaluation,
+            @JsonPropertyDescription("Short stable name for the evaluation, e.g. 'Atlas Freight Logistics inventory tooling evaluation'. Empty string when partOfEvaluation is false.")
+            String name,
+            @JsonPropertyDescription("Confidence 0.0-1.0 that this communication is evaluation activity.")
+            double confidence,
+            @JsonPropertyDescription("Short verbatim quote supporting the signal. Empty string when partOfEvaluation is false.")
             String evidence) {
     }
 

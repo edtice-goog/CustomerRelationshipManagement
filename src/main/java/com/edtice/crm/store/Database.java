@@ -47,24 +47,61 @@ public class Database {
         });
     }
 
-    /** Additive migrations for databases created before a column existed. */
+    /** Additive migrations for databases created before a column or table existed. */
     private void migrate(Connection c) throws SQLException {
         if (!isSqlite()) {
             return;
         }
-        boolean hasMergedInto = false;
+        addColumnIfMissing(c, "entities", "merged_into", "INTEGER REFERENCES entities(id)");
+        addColumnIfMissing(c, "observations", "activity_id", "INTEGER REFERENCES activities(id)");
+        migrateCasesToActivities(c);
+    }
+
+    private void addColumnIfMissing(Connection c, String table, String column, String type) throws SQLException {
+        boolean present = false;
         try (Statement st = c.createStatement();
-             var rs = st.executeQuery("PRAGMA table_info(entities)")) {
+             var rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
             while (rs.next()) {
-                if ("merged_into".equalsIgnoreCase(rs.getString("name"))) {
-                    hasMergedInto = true;
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    present = true;
                 }
             }
         }
-        if (!hasMergedInto) {
+        if (!present) {
             try (Statement st = c.createStatement()) {
-                st.executeUpdate("ALTER TABLE entities ADD COLUMN merged_into INTEGER REFERENCES entities(id)");
+                st.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
             }
+        }
+    }
+
+    /** One-time: fold the original support-case tables into the generic activities model. */
+    private void migrateCasesToActivities(Connection c) throws SQLException {
+        boolean hasCases;
+        try (Statement st = c.createStatement();
+             var rs = st.executeQuery(
+                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cases'")) {
+            hasCases = rs.next();
+        }
+        if (!hasCases) {
+            return;
+        }
+        try (Statement st = c.createStatement()) {
+            st.executeUpdate("""
+                    INSERT INTO activities (id, kind, state, label, token, reference, created_at)
+                    SELECT id, 'support', 'open', subject, case_token, case_number, created_at FROM cases""");
+            st.executeUpdate("""
+                    INSERT INTO activity_documents (activity_id, source_doc_id)
+                    SELECT case_id, source_doc_id FROM case_documents""");
+            st.executeUpdate("""
+                    INSERT INTO activity_assessments (id, activity_id, triggered_by_doc, health,
+                        customer_disposition, disposition_notes, technical_progress, technical_notes,
+                        root_cause_progress, root_cause_notes, summary, created_at)
+                    SELECT id, case_id, triggered_by_doc, health, customer_disposition, disposition_notes,
+                        technical_progress, technical_notes, root_cause_progress, root_cause_notes,
+                        summary, created_at FROM case_assessments""");
+            st.executeUpdate("DROP TABLE case_assessments");
+            st.executeUpdate("DROP TABLE case_documents");
+            st.executeUpdate("DROP TABLE cases");
         }
     }
 
@@ -145,23 +182,45 @@ public class Database {
                     source_doc_id INTEGER REFERENCES source_documents(id)
                 )""",
                 """
-                CREATE TABLE IF NOT EXISTS cases (
+                CREATE TABLE IF NOT EXISTS opportunities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    case_token TEXT NOT NULL UNIQUE,
-                    case_number TEXT,
-                    subject TEXT,
+                    guid TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    external_system TEXT,
+                    external_ref TEXT,
                     created_at TEXT NOT NULL
                 )""",
                 """
-                CREATE TABLE IF NOT EXISTS case_documents (
-                    case_id INTEGER NOT NULL REFERENCES cases(id),
-                    source_doc_id INTEGER NOT NULL REFERENCES source_documents(id),
-                    PRIMARY KEY (case_id, source_doc_id)
+                CREATE TABLE IF NOT EXISTS opportunity_attributes (
+                    opportunity_id INTEGER NOT NULL REFERENCES opportunities(id),
+                    key TEXT NOT NULL,
+                    value TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (opportunity_id, key)
                 )""",
                 """
-                CREATE TABLE IF NOT EXISTS case_assessments (
+                CREATE TABLE IF NOT EXISTS activities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    case_id INTEGER NOT NULL REFERENCES cases(id),
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    label TEXT,
+                    token TEXT UNIQUE,
+                    reference TEXT,
+                    primary_entity_id INTEGER REFERENCES entities(id),
+                    opportunity_id INTEGER REFERENCES opportunities(id),
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT
+                )""",
+                """
+                CREATE TABLE IF NOT EXISTS activity_documents (
+                    activity_id INTEGER NOT NULL REFERENCES activities(id),
+                    source_doc_id INTEGER NOT NULL REFERENCES source_documents(id),
+                    PRIMARY KEY (activity_id, source_doc_id)
+                )""",
+                """
+                CREATE TABLE IF NOT EXISTS activity_assessments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    activity_id INTEGER NOT NULL REFERENCES activities(id),
                     triggered_by_doc INTEGER REFERENCES source_documents(id),
                     health TEXT NOT NULL,
                     customer_disposition TEXT,
@@ -196,7 +255,8 @@ public class Database {
                 "CREATE INDEX IF NOT EXISTS idx_obs_entity ON observations(entity_id, attribute, status)",
                 "CREATE INDEX IF NOT EXISTS idx_obs_status ON observations(status)",
                 "CREATE INDEX IF NOT EXISTS idx_docs_status ON source_documents(status)",
-                "CREATE INDEX IF NOT EXISTS idx_case_docs_doc ON case_documents(source_doc_id)",
-                "CREATE INDEX IF NOT EXISTS idx_case_assess ON case_assessments(case_id)");
+                "CREATE INDEX IF NOT EXISTS idx_activity_docs_doc ON activity_documents(source_doc_id)",
+                "CREATE INDEX IF NOT EXISTS idx_activity_assess ON activity_assessments(activity_id)",
+                "CREATE INDEX IF NOT EXISTS idx_activities_kind ON activities(kind, state)");
     }
 }

@@ -5,8 +5,8 @@ import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.models.messages.MessageCountTokensParams;
 import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.StructuredMessageCreateParams;
+import com.edtice.crm.domain.Activity;
 import com.edtice.crm.domain.SourceDocument;
-import com.edtice.crm.domain.SupportCase;
 import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -31,9 +31,12 @@ public class ClaudeExtractor implements Extractor {
             - sentiment is the customer's apparent disposition in this communication: positive, neutral, or negative.
             - commitments are concrete promises one party made to another ("I'll send X", "we'll have that fixed by Friday").
               Requests are not commitments until someone agrees to them. Attribute each commitment to the person who owes it.
+            - evaluationSignal: mark partOfEvaluation true when the communication belongs to a prospective customer
+              evaluating our product or service (demo requests, trials, proofs of concept, technical validation,
+              purchase evaluation). Routine support of an existing deployment is NOT an evaluation.
             """;
 
-    private static final String CASE_PROMPT = """
+    private static final String SUPPORT_ASSESS_PROMPT = """
             You assess the status of a customer support case from its email history. You are advising the
             account owner on customer success, not managing the ticket itself.
 
@@ -52,6 +55,46 @@ public class ClaudeExtractor implements Extractor {
             - Be direct. If the case is going badly, say so plainly and say why.
             - The summary should let the account owner catch up in one read: what the problem is, where things
               stand, and what (if anything) needs to happen next.
+            """;
+
+    private static final String EVALUATION_ASSESS_PROMPT = """
+            You assess the status of a prospective customer's evaluation of our product or service from its
+            email history. You are advising the account owner on winning the evaluation by serving the
+            customer well.
+
+            Assess three independent tracks:
+            1. customerDisposition — the evaluator's engagement and enthusiasm: are they leaning in
+               (scheduling, asking substantive questions, involving colleagues) or cooling off?
+            2. technicalProgress — whether the evaluation itself is progressing: demos happening, trials
+               running, technical questions being answered, milestones advancing toward a decision.
+            3. rootCauseProgress — whether the evaluation addresses the customer's actual business need.
+               An evaluation can be busy yet aimed at the wrong problem; call that out.
+
+            Rules:
+            - The emails are given in the order received. Weight the most recent email most heavily, but judge
+              trajectory across the whole history.
+            - health is green when engagement and progress are sound, yellow when momentum or fit needs
+              attention, red when the evaluation is at risk of stalling out or being lost.
+            - Be direct about risks: unanswered questions, slipping timelines, missing stakeholders.
+            - The summary should let the account owner catch up in one read: what the customer is evaluating,
+              why, where it stands, and what needs to happen next.
+            """;
+
+    private static final String RELATIONSHIP_ASSESS_PROMPT = """
+            You assess the health of an ongoing customer relationship-management activity from its email
+            history. You are advising the account owner on customer success.
+
+            Assess three independent tracks:
+            1. customerDisposition — the customer's engagement and warmth toward the relationship.
+            2. technicalProgress — whether the activity's substance is moving: meetings happening,
+               follow-ups honored, value being delivered.
+            3. rootCauseProgress — whether the relationship work addresses what the customer actually
+               needs from the vendor, not just calendar upkeep.
+
+            Rules:
+            - The emails are given in the order received. Weight the most recent most heavily; judge trajectory.
+            - health: green = sound, yellow = needs attention, red = relationship at risk.
+            - Be direct, and make the summary a one-read catch-up with a clear next step.
             """;
 
     private static final String MERGE_PROMPT = """
@@ -152,28 +195,37 @@ public class ClaudeExtractor implements Extractor {
     }
 
     @Override
-    public CaseStatus assessCase(SupportCase supportCase, List<SourceDocument> history,
-                                 ApiCredentials credentials) {
+    public AssessmentResult assessActivity(Activity activity, List<SourceDocument> history,
+                                           ApiCredentials credentials) {
+        String prompt = switch (activity.kind()) {
+            case Activity.SUPPORT -> SUPPORT_ASSESS_PROMPT;
+            case Activity.EVALUATION -> EVALUATION_ASSESS_PROMPT;
+            default -> RELATIONSHIP_ASSESS_PROMPT;
+        };
+
         StringBuilder thread = new StringBuilder();
-        thread.append("Support case ").append(supportCase.caseToken());
-        if (supportCase.caseNumber() != null && !supportCase.caseNumber().isBlank()) {
-            thread.append(" (case number ").append(supportCase.caseNumber()).append(")");
+        thread.append(activity.kindLabel()).append(": ").append(activity.displayLabel());
+        if (activity.token() != null && !activity.token().isBlank()) {
+            thread.append(" (token ").append(activity.token()).append(")");
         }
-        thread.append("\nEmail history, in the order received (").append(history.size()).append(" emails):\n");
+        thread.append("\nCommunication history, in the order received (")
+                .append(history.size()).append(" items):\n");
         int n = 0;
         for (SourceDocument doc : history) {
             n++;
-            thread.append("\n===== EMAIL ").append(n).append(" of ").append(history.size())
+            thread.append("\n===== ITEM ").append(n).append(" of ").append(history.size())
                     .append(" (ingested ").append(doc.receivedAt()).append(") =====\n")
                     .append(doc.rawContent()).append('\n');
         }
-        thread.append("\n===== END OF HISTORY =====\nAssess the case as of the most recent email.");
+        thread.append("\n===== END OF HISTORY =====\nAssess the ")
+                .append(activity.kindLabel().toLowerCase())
+                .append(" as of the most recent communication.");
 
-        StructuredMessageCreateParams<CaseStatus> params = MessageCreateParams.builder()
+        StructuredMessageCreateParams<AssessmentResult> params = MessageCreateParams.builder()
                 .model(model)
                 .maxTokens(16000L)
-                .system(CASE_PROMPT)
-                .outputConfig(CaseStatus.class)
+                .system(prompt)
+                .outputConfig(AssessmentResult.class)
                 .addUserMessage(thread.toString())
                 .build();
 
@@ -184,7 +236,7 @@ public class ClaudeExtractor implements Extractor {
                 .map(typed -> typed.text())
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
-                        "Case assessment returned no structured content (stop_reason=" + response.stopReason() + ")"));
+                        "Assessment returned no structured content (stop_reason=" + response.stopReason() + ")"));
     }
 
     @Override

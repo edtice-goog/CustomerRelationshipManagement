@@ -3,13 +3,15 @@ package com.edtice.crm.domain;
 import java.time.Instant;
 
 /**
- * One recalculation of a case's status, produced from the full email history at
- * that point in time. The newest assessment is the case's current status; the
- * history shows how the case has trended.
+ * One recalculation of an activity's status, produced from the full document
+ * history at that point in time. The tracks carry kind-specific meaning:
+ * for support — customer disposition / technical progress / root cause;
+ * for evaluations — evaluator engagement / evaluation progress / fit to the
+ * customer's actual business need.
  */
-public record CaseAssessment(
+public record ActivityAssessment(
         long id,
-        long caseId,
+        long activityId,
         Long triggeredByDoc,
         String health,
         String customerDisposition,

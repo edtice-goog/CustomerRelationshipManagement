@@ -1,19 +1,21 @@
 package com.edtice.crm.web;
 
-import com.edtice.crm.domain.CaseAssessment;
+import com.edtice.crm.activities.ActivityService;
+import com.edtice.crm.domain.Activity;
+import com.edtice.crm.domain.ActivityAssessment;
 import com.edtice.crm.domain.Entity;
 import com.edtice.crm.domain.HousekeepingRecord;
+import com.edtice.crm.domain.HousekeepingStatus;
 import com.edtice.crm.domain.Observation;
 import com.edtice.crm.domain.ObservationStatus;
 import com.edtice.crm.domain.Relationship;
 import com.edtice.crm.domain.SourceDocument;
-import com.edtice.crm.domain.SupportCase;
 import com.edtice.crm.housekeeping.HousekeepingService;
 import com.edtice.crm.ingest.IngestService;
 import com.edtice.crm.pipeline.PipelineService;
-import com.edtice.crm.store.CaseStore;
-import com.edtice.crm.store.HousekeepingStore;
+import com.edtice.crm.store.ActivityStore;
 import com.edtice.crm.store.EntityStore;
+import com.edtice.crm.store.HousekeepingStore;
 import com.edtice.crm.store.ObservationStore;
 import com.edtice.crm.store.RelationshipStore;
 import com.edtice.crm.store.StagingStore;
@@ -50,12 +52,14 @@ public class PagesResource {
     private final StagingStore staging;
     private final IngestService ingest;
     private final PipelineService pipeline;
-    private final CaseStore caseStore;
+    private final ActivityStore activityStore;
+    private final ActivityService activityService;
     private final HousekeepingStore housekeepingStore;
     private final HousekeepingService housekeeping;
 
     PagesResource(EntityStore entities, ObservationStore observations, RelationshipStore relationships,
-                  StagingStore staging, IngestService ingest, PipelineService pipeline, CaseStore caseStore,
+                  StagingStore staging, IngestService ingest, PipelineService pipeline,
+                  ActivityStore activityStore, ActivityService activityService,
                   HousekeepingStore housekeepingStore, HousekeepingService housekeeping) {
         this.entities = entities;
         this.observations = observations;
@@ -63,7 +67,8 @@ public class PagesResource {
         this.staging = staging;
         this.ingest = ingest;
         this.pipeline = pipeline;
-        this.caseStore = caseStore;
+        this.activityStore = activityStore;
+        this.activityService = activityService;
         this.housekeepingStore = housekeepingStore;
         this.housekeeping = housekeeping;
     }
@@ -95,19 +100,24 @@ public class PagesResource {
                             String confidencePercent, String evidence, Long sourceDocId) {
     }
 
-    public record CaseRow(long id, String label, String subject, int emailCount, String health,
-                          String disposition, String technical, String rootCause, String updated) {
+    public record ActivityRow(long id, String kind, String kindLabel, String state, String label,
+                              String anchorName, int docCount, String health,
+                              String disposition, boolean hasNextStep, String updated) {
     }
 
     public record AssessmentView(String health, String disposition, String dispositionNotes,
                                  String technical, String technicalNotes,
                                  String rootCause, String rootCauseNotes,
                                  String summary, String assessedAt, Long triggeredByDoc) {
-        static AssessmentView of(CaseAssessment a) {
+        static AssessmentView of(ActivityAssessment a) {
             return new AssessmentView(a.health(), a.customerDisposition(), a.customerDispositionNotes(),
                     a.technicalProgress(), a.technicalProgressNotes(), a.rootCauseProgress(),
                     a.rootCauseNotes(), a.summary(), TS.format(a.createdAt()), a.triggeredByDoc());
         }
+    }
+
+    public record CommitmentRow(long id, String owedByName, long owedByEntityId, String value,
+                                boolean implicit, Long sourceDocId) {
     }
 
     @CheckedTemplate
@@ -119,18 +129,20 @@ public class PagesResource {
                                                      List<RelRow> rels, List<HkRow> hkRecords,
                                                      int pendingCount);
 
-        public static native TemplateInstance housekeeping(List<HkRow> open, List<HkRow> decided,
-                                                           int pendingCount);
-
         public static native TemplateInstance review(List<ReviewRow> rows, int pendingCount);
 
         public static native TemplateInstance source(SourceDocument doc, int pendingCount);
 
-        public static native TemplateInstance cases(List<CaseRow> rows, int pendingCount);
+        public static native TemplateInstance activities(List<ActivityRow> rows, int pendingCount);
 
-        public static native TemplateInstance caseDetail(SupportCase supportCase, AssessmentView current,
-                                                         List<AssessmentView> history,
-                                                         List<SourceDocument> docs, int pendingCount);
+        public static native TemplateInstance activityDetail(Activity activity, String anchorName,
+                                                             AssessmentView current,
+                                                             List<AssessmentView> history,
+                                                             List<CommitmentRow> commitments,
+                                                             List<SourceDocument> docs, int pendingCount);
+
+        public static native TemplateInstance housekeeping(List<HkRow> open, List<HkRow> decided,
+                                                           int pendingCount);
     }
 
     // --- pages ---
@@ -181,64 +193,52 @@ public class PagesResource {
     }
 
     @GET
+    @Path("activities")
+    public TemplateInstance activities() {
+        List<ActivityRow> rows = new ArrayList<>();
+        for (Activity a : activityStore.list(null, null)) {
+            var latest = activityStore.latestAssessment(a.id());
+            String anchor = a.primaryEntityId() == null ? ""
+                    : entities.byId(a.primaryEntityId()).map(Entity::displayName).orElse("");
+            rows.add(new ActivityRow(a.id(), a.kind(), a.kindLabel(), a.state().db(), a.displayLabel(),
+                    anchor, activityStore.documentCount(a.id()),
+                    latest.map(ActivityAssessment::health).orElse("unassessed"),
+                    latest.map(ActivityAssessment::customerDisposition).orElse(""),
+                    observations.activeCommitmentExists(a.id()),
+                    latest.map(x -> TS.format(x.createdAt())).orElse("")));
+        }
+        return Templates.activities(rows, pendingCount());
+    }
+
+    @GET
+    @Path("activity/{id}")
+    public TemplateInstance activityDetail(@PathParam("id") long id) {
+        Activity a = activityStore.byId(id).orElseThrow(NotFoundException::new);
+        List<AssessmentView> history = activityStore.assessments(id).stream()
+                .map(AssessmentView::of).toList();
+        AssessmentView current = history.isEmpty() ? null : history.get(0);
+        String anchor = a.primaryEntityId() == null ? ""
+                : entities.byId(a.primaryEntityId()).map(Entity::displayName).orElse("");
+        List<CommitmentRow> commitments = observations.commitmentsForActivity(id).stream()
+                .map(o -> new CommitmentRow(o.id(),
+                        entities.byId(o.entityId()).map(Entity::displayName).orElse("?"),
+                        o.entityId(), o.value(),
+                        o.evidence() != null && o.evidence().startsWith("(implicit"),
+                        o.sourceDocId()))
+                .toList();
+        return Templates.activityDetail(a, anchor, current, history, commitments,
+                activityStore.documents(id), pendingCount());
+    }
+
+    @GET
     @Path("housekeeping")
     public TemplateInstance housekeeping() {
         List<HkRow> open = new ArrayList<>();
         List<HkRow> decided = new ArrayList<>();
         for (HousekeepingRecord r : housekeepingStore.listAll()) {
-            (r.status() == com.edtice.crm.domain.HousekeepingStatus.OPEN ? open : decided).add(toHkRow(r));
+            (r.status() == HousekeepingStatus.OPEN ? open : decided).add(toHkRow(r));
         }
         return Templates.housekeeping(open, decided, pendingCount());
-    }
-
-    @POST
-    @Path("housekeeping/{id}/merge")
-    public Response housekeepingMerge(@PathParam("id") long id, @FormParam("note") String note) {
-        housekeeping.decideManually(id, true, note);
-        return Response.seeOther(URI.create("/housekeeping")).build();
-    }
-
-    @POST
-    @Path("housekeeping/{id}/keep")
-    public Response housekeepingKeep(@PathParam("id") long id, @FormParam("note") String note) {
-        housekeeping.decideManually(id, false, note);
-        return Response.seeOther(URI.create("/housekeeping")).build();
-    }
-
-    private HkRow toHkRow(HousekeepingRecord r) {
-        String names = r.entityIds().stream()
-                .map(eid -> entities.byId(eid).map(Entity::displayName).orElse("#" + eid))
-                .reduce((x, y) -> x + "  ↔  " + y).orElse("");
-        return new HkRow(r.id(), r.status().db(), names, r.entityIds(), r.evidence(), r.reasoning(),
-                r.decidedBy() == null ? "" : r.decidedBy(), r.confidencePercent(), TS.format(r.createdAt()));
-    }
-
-    @GET
-    @Path("cases")
-    public TemplateInstance cases() {
-        List<CaseRow> rows = new ArrayList<>();
-        for (SupportCase sc : caseStore.listAll()) {
-            var latest = caseStore.latestAssessment(sc.id());
-            rows.add(new CaseRow(sc.id(), sc.label(),
-                    sc.subject() == null ? "" : sc.subject(),
-                    caseStore.documentCount(sc.id()),
-                    latest.map(CaseAssessment::health).orElse("unassessed"),
-                    latest.map(CaseAssessment::customerDisposition).orElse(""),
-                    latest.map(CaseAssessment::technicalProgress).orElse(""),
-                    latest.map(CaseAssessment::rootCauseProgress).orElse(""),
-                    latest.map(a -> TS.format(a.createdAt())).orElse("")));
-        }
-        return Templates.cases(rows, pendingCount());
-    }
-
-    @GET
-    @Path("case/{id}")
-    public TemplateInstance caseDetail(@PathParam("id") long id) {
-        SupportCase sc = caseStore.byId(id).orElseThrow(NotFoundException::new);
-        List<AssessmentView> history = caseStore.assessments(id).stream()
-                .map(AssessmentView::of).toList();
-        AssessmentView current = history.isEmpty() ? null : history.get(0);
-        return Templates.caseDetail(sc, current, history, caseStore.documents(id), pendingCount());
     }
 
     @GET
@@ -292,7 +292,43 @@ public class PagesResource {
         return Response.seeOther(URI.create("/")).build();
     }
 
+    @POST
+    @Path("activity/{id}/close")
+    public Response closeActivity(@PathParam("id") long id) {
+        activityService.close(id);
+        return Response.seeOther(URI.create("/activity/" + id)).build();
+    }
+
+    @POST
+    @Path("activity/{id}/reopen")
+    public Response reopenActivity(@PathParam("id") long id) {
+        activityService.reopen(id);
+        return Response.seeOther(URI.create("/activity/" + id)).build();
+    }
+
+    @POST
+    @Path("housekeeping/{id}/merge")
+    public Response housekeepingMerge(@PathParam("id") long id, @FormParam("note") String note) {
+        housekeeping.decideManually(id, true, note);
+        return Response.seeOther(URI.create("/housekeeping")).build();
+    }
+
+    @POST
+    @Path("housekeeping/{id}/keep")
+    public Response housekeepingKeep(@PathParam("id") long id, @FormParam("note") String note) {
+        housekeeping.decideManually(id, false, note);
+        return Response.seeOther(URI.create("/housekeeping")).build();
+    }
+
     // --- helpers ---
+
+    private HkRow toHkRow(HousekeepingRecord r) {
+        String names = r.entityIds().stream()
+                .map(eid -> entities.byId(eid).map(Entity::displayName).orElse("#" + eid))
+                .reduce((x, y) -> x + "  ↔  " + y).orElse("");
+        return new HkRow(r.id(), r.status().db(), names, r.entityIds(), r.evidence(), r.reasoning(),
+                r.decidedBy() == null ? "" : r.decidedBy(), r.confidencePercent(), TS.format(r.createdAt()));
+    }
 
     /** Latest active value per attribute — the projection that turns observations into a profile. */
     private Map<String, String> latestActive(long entityId) {

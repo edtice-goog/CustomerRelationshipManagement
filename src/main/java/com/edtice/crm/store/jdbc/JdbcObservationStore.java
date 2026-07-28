@@ -19,7 +19,7 @@ import java.util.Optional;
 public class JdbcObservationStore implements ObservationStore {
 
     private static final String COLS =
-            "id, entity_id, attribute, value, confidence, evidence, source_doc_id, status, observed_at";
+            "id, entity_id, attribute, value, confidence, evidence, source_doc_id, activity_id, status, observed_at";
 
     private final Database db;
 
@@ -29,12 +29,12 @@ public class JdbcObservationStore implements ObservationStore {
 
     @Override
     public Observation insert(long entityId, String attribute, String value, double confidence,
-                              String evidence, Long sourceDocId, ObservationStatus status) {
+                              String evidence, Long sourceDocId, Long activityId, ObservationStatus status) {
         Instant now = Instant.now();
         return db.with(c -> {
             try (PreparedStatement ps = c.prepareStatement(
-                    "INSERT INTO observations (entity_id, attribute, value, confidence, evidence, source_doc_id, status, observed_at) "
-                            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO observations (entity_id, attribute, value, confidence, evidence, source_doc_id, "
+                            + "activity_id, status, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS)) {
                 ps.setLong(1, entityId);
                 ps.setString(2, attribute);
@@ -46,13 +46,18 @@ public class JdbcObservationStore implements ObservationStore {
                 } else {
                     ps.setLong(6, sourceDocId);
                 }
-                ps.setString(7, status.db());
-                ps.setString(8, now.toString());
+                if (activityId == null) {
+                    ps.setNull(7, java.sql.Types.BIGINT);
+                } else {
+                    ps.setLong(7, activityId);
+                }
+                ps.setString(8, status.db());
+                ps.setString(9, now.toString());
                 ps.executeUpdate();
                 try (ResultSet keys = ps.getGeneratedKeys()) {
                     keys.next();
                     return new Observation(keys.getLong(1), entityId, attribute, value, confidence,
-                            evidence, sourceDocId, status, now);
+                            evidence, sourceDocId, activityId, status, now);
                 }
             }
         });
@@ -164,6 +169,37 @@ public class JdbcObservationStore implements ObservationStore {
         });
     }
 
+    @Override
+    public List<Observation> commitmentsForActivity(long activityId) {
+        return db.with(c -> {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT " + COLS + " FROM observations WHERE activity_id = ? AND attribute = ? "
+                            + "AND status = ? ORDER BY observed_at DESC, id DESC")) {
+                ps.setLong(1, activityId);
+                ps.setString(2, Observation.COMMITMENT);
+                ps.setString(3, ObservationStatus.ACTIVE.db());
+                try (ResultSet rs = ps.executeQuery()) {
+                    return mapAll(rs);
+                }
+            }
+        });
+    }
+
+    @Override
+    public boolean activeCommitmentExists(long activityId) {
+        return db.with(c -> {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM observations WHERE activity_id = ? AND attribute = ? AND status = ? LIMIT 1")) {
+                ps.setLong(1, activityId);
+                ps.setString(2, Observation.COMMITMENT);
+                ps.setString(3, ObservationStatus.ACTIVE.db());
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        });
+    }
+
     private static List<Observation> mapAll(ResultSet rs) throws SQLException {
         List<Observation> out = new ArrayList<>();
         while (rs.next()) {
@@ -175,6 +211,8 @@ public class JdbcObservationStore implements ObservationStore {
     private static Observation map(ResultSet rs) throws SQLException {
         long sourceDoc = rs.getLong("source_doc_id");
         Long sourceDocId = rs.wasNull() ? null : sourceDoc;
+        long activity = rs.getLong("activity_id");
+        Long activityId = rs.wasNull() ? null : activity;
         return new Observation(
                 rs.getLong("id"),
                 rs.getLong("entity_id"),
@@ -183,6 +221,7 @@ public class JdbcObservationStore implements ObservationStore {
                 rs.getDouble("confidence"),
                 rs.getString("evidence"),
                 sourceDocId,
+                activityId,
                 ObservationStatus.fromDb(rs.getString("status")),
                 Instant.parse(rs.getString("observed_at")));
     }
