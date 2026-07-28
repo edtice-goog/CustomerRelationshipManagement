@@ -1,0 +1,27 @@
+{#include base}
+{#title}Source #{doc.id} — Customer Success CRM{/title}
+
+<div class="card">
+  <h1>Source document #{doc.id}</h1>
+  <p>
+    <span class="muted">Type:</span> {doc.sourceType} &nbsp;
+    <span class="muted">Status:</span> <span class="pill {doc.status.db}">{doc.status.db}</span> &nbsp;
+    <span class="muted">Received:</span> {doc.receivedAt}
+  </p>
+  {#if doc.error}
+  <p class="evidence">Error: {doc.error}</p>
+  {/if}
+  {#if doc.metadataJson}
+  <p class="mono muted">{doc.metadataJson}</p>
+  {/if}
+  <form class="inline" method="post" action="/source/{doc.id}/reprocess">
+    <button class="ghost" type="submit">Reprocess</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Raw content</h2>
+  <pre class="raw">{doc.rawContent}</pre>
+</div>
+
+{/include}

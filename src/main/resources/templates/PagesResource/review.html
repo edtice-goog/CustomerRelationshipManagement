@@ -1,0 +1,35 @@
+{#include base}
+{#title}Review queue — Customer Success CRM{/title}
+
+<div class="card">
+  <h1>Review queue</h1>
+  {#if rows.isEmpty()}
+  <p class="muted">Nothing waiting for review. Low-confidence extractions land here.</p>
+  {#else}
+  <table>
+    <tr><th>Entity</th><th>Attribute</th><th>Value</th><th>Confidence</th><th>Evidence</th><th></th></tr>
+    {#for r in rows}
+    <tr>
+      <td><a href="/entity/{r.entityId}">{r.entityName}</a></td>
+      <td>{r.attribute}</td>
+      <td>{r.value}</td>
+      <td>{r.confidencePercent}</td>
+      <td>
+        {#if r.evidence}<div class="evidence">&ldquo;{r.evidence}&rdquo;</div>{/if}
+        {#if r.sourceDocId}<a href="/source/{r.sourceDocId}">source #{r.sourceDocId}</a>{/if}
+      </td>
+      <td style="white-space:nowrap">
+        <form class="inline" method="post" action="/review/{r.id}/approve">
+          <button type="submit">Approve</button>
+        </form>
+        <form class="inline" method="post" action="/review/{r.id}/reject">
+          <button class="danger" type="submit">Reject</button>
+        </form>
+      </td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+{/include}

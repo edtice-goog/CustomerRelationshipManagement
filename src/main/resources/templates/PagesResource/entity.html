@@ -1,0 +1,40 @@
+{#include base}
+{#title}{entity.displayName} — Customer Success CRM{/title}
+
+<div class="card">
+  <h1>{entity.displayName} <span class="muted" style="font-size:0.9rem">({entity.kind})</span></h1>
+  {#if !rels.isEmpty()}
+  <p>
+    {#for r in rels}
+    <span class="muted">{r.kind}</span> <a href="/entity/{r.otherId}">{r.otherName}</a>&nbsp;&nbsp;
+    {/for}
+  </p>
+  {/if}
+</div>
+
+{#if groups.isEmpty()}
+<div class="card"><p class="muted">Nothing known about this entity yet.</p></div>
+{/if}
+
+{#for g in groups}
+<div class="card">
+  <h2>{g.attribute}</h2>
+  <table>
+    <tr><th>Value</th><th>Status</th><th>Confidence</th><th>Observed</th><th>Provenance</th></tr>
+    {#for row in g.rows}
+    <tr>
+      <td>{row.value}</td>
+      <td><span class="pill {row.status}">{row.status}</span></td>
+      <td>{row.confidencePercent}</td>
+      <td class="muted">{row.observedAt}</td>
+      <td>
+        {#if row.evidence}<div class="evidence">&ldquo;{row.evidence}&rdquo;</div>{/if}
+        {#if row.sourceDocId}<a href="/source/{row.sourceDocId}">source #{row.sourceDocId}</a>{/if}
+      </td>
+    </tr>
+    {/for}
+  </table>
+</div>
+{/for}
+
+{/include}

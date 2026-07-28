@@ -1,0 +1,82 @@
+{#include base}
+{#title}Customers — Customer Success CRM{/title}
+
+<div class="card">
+  <h2>Add a communication</h2>
+  <p class="muted">Paste an email or message. People, companies, and contact details are extracted automatically — nothing to type into fields.</p>
+  <form method="post" action="/ingest">
+    <textarea name="content" placeholder="Paste the full email here, including the signature..." required></textarea>
+    <div style="display:flex; gap: 0.8rem; margin-top: 0.6rem; align-items: center;">
+      <input type="text" name="note" placeholder="Optional note (e.g. where this came from)" style="flex:1">
+      <button type="submit">Ingest &amp; extract</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>People</h2>
+  {#if people.isEmpty()}
+  <p class="muted">No people yet — paste a communication above to get started.</p>
+  {#else}
+  <table>
+    <tr><th>Name</th><th>Email</th><th>Title</th><th>Company</th><th>Last sentiment</th></tr>
+    {#for p in people}
+    <tr>
+      <td><a href="/entity/{p.id}">{p.name}</a></td>
+      <td>{p.email}</td>
+      <td>{p.title}</td>
+      <td>{p.company}</td>
+      <td><span class="sentiment {p.sentiment}">{p.sentiment}</span></td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+<div class="card">
+  <h2>Organizations</h2>
+  {#if orgs.isEmpty()}
+  <p class="muted">None yet.</p>
+  {#else}
+  <table>
+    <tr><th>Name</th><th>Website</th></tr>
+    {#for o in orgs}
+    <tr>
+      <td><a href="/entity/{o.id}">{o.name}</a></td>
+      <td>{o.website}</td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+<div class="card">
+  <h2>Recent staged documents</h2>
+  {#if docs.isEmpty()}
+  <p class="muted">Nothing ingested yet.</p>
+  {#else}
+  <table>
+    <tr><th>#</th><th>Preview</th><th>Source</th><th>Status</th><th></th></tr>
+    {#for d in docs}
+    <tr>
+      <td><a href="/source/{d.id}">{d.id}</a></td>
+      <td class="mono">{d.preview}</td>
+      <td>{d.sourceType}</td>
+      <td>
+        <span class="pill {d.status.db}">{d.status.db}</span>
+        {#if d.error}<div class="evidence">{d.error}</div>{/if}
+      </td>
+      <td>
+        {#if d.status.db == 'error' || d.status.db == 'staged'}
+        <form class="inline" method="post" action="/source/{d.id}/reprocess">
+          <button class="ghost" type="submit">Reprocess</button>
+        </form>
+        {/if}
+      </td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+{/include}
