@@ -89,6 +89,12 @@ Then open http://localhost:8080 (UI) or http://localhost:8080/q/swagger-ui (API)
 Configuration lives in `src/main/resources/application.properties`
 (`crm.db.url`, `crm.extraction.model`, `crm.autoPromoteThreshold`).
 
+## Feeding it from an automation agent
+
+[`INGESTION.md`](INGESTION.md) is an agent-facing guide (written for Claude Cowork or similar):
+the workflow, exact payloads, idempotency rules, and what never to do. The machine-readable
+contract is [`openapi.yaml`](openapi.yaml) (kept in sync with the live `/q/openapi`).
+
 ## API quick reference
 
 ```bash
