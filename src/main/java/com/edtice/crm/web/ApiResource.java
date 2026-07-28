@@ -60,12 +60,13 @@ public class ApiResource {
     private final HousekeepingService housekeeping;
     private final HousekeepingStore housekeepingStore;
     private final EntityStore entities;
+    private final com.fasterxml.jackson.databind.ObjectMapper mapper;
 
     ApiResource(Extractor extractor, IngestService ingest, StagingStore staging,
                 PipelineService pipeline, ActivityService activityService, ActivityStore activities,
                 OpportunityStore opportunities, ObservationStore observations,
                 HousekeepingService housekeeping, HousekeepingStore housekeepingStore,
-                EntityStore entities) {
+                EntityStore entities, com.fasterxml.jackson.databind.ObjectMapper mapper) {
         this.extractor = extractor;
         this.ingest = ingest;
         this.staging = staging;
@@ -77,6 +78,7 @@ public class ApiResource {
         this.housekeeping = housekeeping;
         this.housekeepingStore = housekeepingStore;
         this.entities = entities;
+        this.mapper = mapper;
     }
 
     // --- shared request/response shapes ---
@@ -193,6 +195,127 @@ public class ApiResource {
         return Response.ok(new IngestResponse(existing.map(SourceDocument::id).orElse(null),
                 existing.map(d -> d.status().db()).orElse(null), true,
                 "Already ingested; not re-processed", info)).build();
+    }
+
+    // --- Teams ingestion ---
+
+    public record TeamsMessage(
+            @Schema(description = "The Teams message id — used for deduplication when present.")
+            String messageId,
+            @Schema(description = "Display name of the sender.", required = true)
+            String sender,
+            @Schema(description = "Sender's email/UPN if known — greatly improves entity resolution.")
+            String senderEmail,
+            @Schema(description = "Message timestamp as a string, passed through verbatim.")
+            String timestamp,
+            @Schema(description = "The message text.", required = true)
+            String text) {
+    }
+
+    public record TeamsIngestRequest(
+            @Schema(description = "Team name, for channel conversations.")
+            String teamName,
+            @Schema(description = "Channel name, for channel conversations.")
+            String channelName,
+            @Schema(description = "Chat name or participant list, for 1:1 / group chats.")
+            String chatName,
+            @Schema(description = "The messages of the conversation window, in chronological order. "
+                    + "Send a window with enough context — single chat messages are rarely meaningful alone. "
+                    + "Overlapping windows are safe: when messageIds are present, the same window is "
+                    + "deduplicated on re-submission.", required = true)
+            List<TeamsMessage> messages,
+            @Schema(description = "Stable id for deduplication. Defaults to a hash of the message ids (or the transcript).")
+            String externalId,
+            ClaudeConfig claude) {
+    }
+
+    @POST
+    @Path("ingest/teams")
+    @Operation(summary = "Ingest a Microsoft Teams conversation window",
+            description = "Analogous to /api/ingest for email, shaped for chat: accepts a batch of Teams "
+                    + "messages (a conversation window) with sender/timestamp per message, renders them into "
+                    + "one transcript document, and runs the same extraction pipeline — people, sentiment, "
+                    + "commitments, evaluation detection, commitment fulfillment. Returns the staged document "
+                    + "id; poll /api/documents/{id}.")
+    public Response ingestTeams(TeamsIngestRequest request) {
+        if (request == null || request.messages() == null || request.messages().isEmpty()
+                || request.messages().stream().allMatch(m -> m.text() == null || m.text().isBlank())) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(new IngestResponse(null, null, false, "messages with text are required", null)).build();
+        }
+
+        StringBuilder transcript = new StringBuilder("Microsoft Teams conversation\n");
+        if (notBlank(request.teamName())) {
+            transcript.append("Team: ").append(request.teamName()).append('\n');
+        }
+        if (notBlank(request.channelName())) {
+            transcript.append("Channel: ").append(request.channelName()).append('\n');
+        }
+        if (notBlank(request.chatName())) {
+            transcript.append("Chat: ").append(request.chatName()).append('\n');
+        }
+        transcript.append("---\n");
+        StringBuilder idSeed = new StringBuilder();
+        boolean allIds = true;
+        for (TeamsMessage m : request.messages()) {
+            if (m.text() == null || m.text().isBlank()) {
+                continue;
+            }
+            transcript.append('[');
+            if (notBlank(m.timestamp())) {
+                transcript.append(m.timestamp()).append("] ");
+            } else {
+                transcript.setLength(transcript.length() - 1);
+            }
+            transcript.append(notBlank(m.sender()) ? m.sender() : "Unknown");
+            if (notBlank(m.senderEmail())) {
+                transcript.append(" <").append(m.senderEmail()).append('>');
+            }
+            transcript.append(": ").append(m.text().strip()).append('\n');
+            if (notBlank(m.messageId())) {
+                idSeed.append(m.messageId()).append('|');
+            } else {
+                allIds = false;
+            }
+        }
+
+        String conversationKey = String.join("|",
+                request.teamName() == null ? "" : request.teamName(),
+                request.channelName() == null ? "" : request.channelName(),
+                request.chatName() == null ? "" : request.chatName());
+        String externalId = notBlank(request.externalId())
+                ? request.externalId()
+                : allIds && idSeed.length() > 0
+                        ? "teams:" + IngestService.contentHash(conversationKey + "|" + idSeed)
+                        : IngestService.contentHash(transcript.toString());
+
+        String metadata;
+        try {
+            metadata = mapper.writeValueAsString(Map.of(
+                    "teamName", request.teamName() == null ? "" : request.teamName(),
+                    "channelName", request.channelName() == null ? "" : request.channelName(),
+                    "chatName", request.chatName() == null ? "" : request.chatName(),
+                    "messageCount", request.messages().size()));
+        } catch (Exception e) {
+            metadata = null;
+        }
+
+        Optional<IngestService.IngestOutcome> outcome = ingest.ingest("teams_chat", externalId,
+                transcript.toString(), metadata, ClaudeConfig.orNull(request.claude()));
+        if (outcome.isPresent()) {
+            ActivityInfoDto info = outcome.get().activityInfo().map(ActivityInfoDto::of).orElse(null);
+            return Response.accepted(new IngestResponse(outcome.get().doc().id(),
+                    outcome.get().doc().status().db(), false,
+                    "Staged; extraction running in background", info)).build();
+        }
+        Optional<SourceDocument> existing = staging.byExternalId(externalId);
+        return Response.ok(new IngestResponse(existing.map(SourceDocument::id).orElse(null),
+                existing.map(d -> d.status().db()).orElse(null), true,
+                "Already ingested; not re-processed", null)).build();
+    }
+
+    private static boolean notBlank(String s) {
+        return s != null && !s.isBlank();
     }
 
     @GET

@@ -99,9 +99,13 @@ curl http://localhost:8080/api/ping
 curl -X POST http://localhost:8080/api/claude/test -H "Content-Type: application/json" \
   -d '{"apiKey":"sk-ant-...","baseUrl":"https://api.anthropic.com"}'
 
-# Ingest a communication
+# Ingest a communication (email or any raw text)
 curl -X POST http://localhost:8080/api/ingest -H "Content-Type: application/json" \
   -d '{"content":"<raw email>","sourceType":"outlook_email","claude":{"apiKey":"sk-ant-..."}}'
+
+# Ingest a Microsoft Teams conversation window (batch of messages; message ids dedup overlapping windows)
+curl -X POST http://localhost:8080/api/ingest/teams -H "Content-Type: application/json" \
+  -d '{"chatName":"Sarah Chen","messages":[{"messageId":"m1","sender":"Sarah Chen","senderEmail":"sarah@co.com","timestamp":"2026-07-28 10:02","text":"..."}]}'
 
 # Poll extraction status / inspect cases
 curl http://localhost:8080/api/documents/1
