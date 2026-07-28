@@ -54,6 +54,23 @@ public class ClaudeExtractor implements Extractor {
               stand, and what (if anything) needs to happen next.
             """;
 
+    private static final String MERGE_PROMPT = """
+            You are the data-housekeeping agent for a CRM. Decide whether two entity records refer to the
+            same real-world person or organization.
+
+            Rules:
+            - Strong evidence for merging: matching email addresses or domains, matching phone numbers or
+              postal addresses, one name being an obvious variant of the other (abbreviation, missing legal
+              suffix, nickname) combined with shared context (same people, same relationships, same sources).
+            - Similar names alone are NOT sufficient — distinct businesses often have similar names. When the
+              profiles show no overlapping hard identifiers and no shared context, prefer keep_separate.
+            - Merging is consequential (records are folded together); use verdict merge only when the evidence
+              would convince a careful human. When genuinely torn, use uncertain — a human will decide.
+            - If prior housekeeping decisions are provided, respect them: uphold the previous conclusion unless
+              evidence that arrived after that decision genuinely contradicts it, and say which you did.
+            - evidenceStatement is facts only; reasoning is where you draw the conclusion.
+            """;
+
     private final String model;
     private final ConcurrentHashMap<String, AnthropicClient> clients = new ConcurrentHashMap<>();
 
@@ -168,5 +185,33 @@ public class ClaudeExtractor implements Extractor {
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
                         "Case assessment returned no structured content (stop_reason=" + response.stopReason() + ")"));
+    }
+
+    @Override
+    public MergeVerdict judgeMerge(String profileA, String profileB, String priorHistory,
+                                   ApiCredentials credentials) {
+        String userMessage = "Are these two records the same real-world entity?\n\n"
+                + "===== RECORD A =====\n" + profileA + "\n\n"
+                + "===== RECORD B =====\n" + profileB + "\n\n"
+                + (priorHistory == null || priorHistory.isBlank()
+                        ? "No prior housekeeping decisions exist for this pair.\n"
+                        : "===== PRIOR HOUSEKEEPING DECISIONS FOR THIS PAIR =====\n" + priorHistory + "\n");
+
+        StructuredMessageCreateParams<MergeVerdict> params = MessageCreateParams.builder()
+                .model(model)
+                .maxTokens(16000L)
+                .system(MERGE_PROMPT)
+                .outputConfig(MergeVerdict.class)
+                .addUserMessage(userMessage)
+                .build();
+
+        var response = clientFor(credentials).messages().create(params);
+
+        return response.content().stream()
+                .flatMap(block -> block.text().stream())
+                .map(typed -> typed.text())
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Merge judgment returned no structured content (stop_reason=" + response.stopReason() + ")"));
     }
 }

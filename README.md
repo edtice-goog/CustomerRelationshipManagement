@@ -33,6 +33,15 @@ sentiment, commitments, and support-case status are extracted automatically by C
   so agents (e.g. Copilot) can drive ingestion. Callers may supply their own Claude API key and
   endpoint per request (e.g. a corporate key with different data-protection terms); keys are
   held in memory only.
+- **Data housekeeping with durable decision records**: candidate duplicate entities are found
+  by code (name normalization + token matching) and judged by the model against full observation
+  profiles. Every deliberation — merge *or* keep-separate — is stored as a housekeeping record
+  linked to both entities, with a statement of evidence and reasoning. Settled pairs are only
+  reconsidered when new evidence arrives, and the prior reasoning is given to the model when
+  they are. Runs on a schedule, opportunistically when extraction creates a similar-named
+  entity, and on demand (`POST /api/housekeeping/run`). High-confidence merges execute
+  automatically (losers become alias tombstones via `merged_into`); borderline pairs wait for
+  a one-click human decision that also becomes part of the record.
 
 ## Architecture
 
@@ -86,6 +95,4 @@ curl http://localhost:8080/api/cases
 ## Status / roadmap
 
 Working v1 used daily by its author. No authentication yet (localhost only — auth is a
-prerequisite for any non-local deployment). Known rough edge: organization entity resolution
-is name-exact, so "Atlas Freight" and "Atlas Freight Co." create separate entities — an
-agent-driven housekeeping pass is the planned fix, rather than manual merge tooling.
+prerequisite for any non-local deployment).

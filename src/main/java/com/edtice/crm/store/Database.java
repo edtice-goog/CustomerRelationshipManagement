@@ -42,8 +42,30 @@ public class Database {
                     st.executeUpdate(ddl);
                 }
             }
+            migrate(c);
             return null;
         });
+    }
+
+    /** Additive migrations for databases created before a column existed. */
+    private void migrate(Connection c) throws SQLException {
+        if (!isSqlite()) {
+            return;
+        }
+        boolean hasMergedInto = false;
+        try (Statement st = c.createStatement();
+             var rs = st.executeQuery("PRAGMA table_info(entities)")) {
+            while (rs.next()) {
+                if ("merged_into".equalsIgnoreCase(rs.getString("name"))) {
+                    hasMergedInto = true;
+                }
+            }
+        }
+        if (!hasMergedInto) {
+            try (Statement st = c.createStatement()) {
+                st.executeUpdate("ALTER TABLE entities ADD COLUMN merged_into INTEGER REFERENCES entities(id)");
+            }
+        }
     }
 
     private boolean isSqlite() {
@@ -87,7 +109,8 @@ public class Database {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL,
                     display_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    merged_into INTEGER REFERENCES entities(id)
                 )""",
                 """
                 CREATE TABLE IF NOT EXISTS source_documents (
@@ -150,6 +173,26 @@ public class Database {
                     summary TEXT,
                     created_at TEXT NOT NULL
                 )""",
+                """
+                CREATE TABLE IF NOT EXISTS housekeeping_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence TEXT,
+                    reasoning TEXT,
+                    decided_by TEXT,
+                    confidence REAL NOT NULL,
+                    prior_record_id INTEGER REFERENCES housekeeping_records(id),
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT
+                )""",
+                """
+                CREATE TABLE IF NOT EXISTS housekeeping_record_entities (
+                    record_id INTEGER NOT NULL REFERENCES housekeeping_records(id),
+                    entity_id INTEGER NOT NULL REFERENCES entities(id),
+                    PRIMARY KEY (record_id, entity_id)
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_hk_entities ON housekeeping_record_entities(entity_id)",
                 "CREATE INDEX IF NOT EXISTS idx_obs_entity ON observations(entity_id, attribute, status)",
                 "CREATE INDEX IF NOT EXISTS idx_obs_status ON observations(status)",
                 "CREATE INDEX IF NOT EXISTS idx_docs_status ON source_documents(status)",

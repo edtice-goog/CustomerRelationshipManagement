@@ -2,14 +2,17 @@ package com.edtice.crm.web;
 
 import com.edtice.crm.domain.CaseAssessment;
 import com.edtice.crm.domain.Entity;
+import com.edtice.crm.domain.HousekeepingRecord;
 import com.edtice.crm.domain.Observation;
 import com.edtice.crm.domain.ObservationStatus;
 import com.edtice.crm.domain.Relationship;
 import com.edtice.crm.domain.SourceDocument;
 import com.edtice.crm.domain.SupportCase;
+import com.edtice.crm.housekeeping.HousekeepingService;
 import com.edtice.crm.ingest.IngestService;
 import com.edtice.crm.pipeline.PipelineService;
 import com.edtice.crm.store.CaseStore;
+import com.edtice.crm.store.HousekeepingStore;
 import com.edtice.crm.store.EntityStore;
 import com.edtice.crm.store.ObservationStore;
 import com.edtice.crm.store.RelationshipStore;
@@ -48,9 +51,12 @@ public class PagesResource {
     private final IngestService ingest;
     private final PipelineService pipeline;
     private final CaseStore caseStore;
+    private final HousekeepingStore housekeepingStore;
+    private final HousekeepingService housekeeping;
 
     PagesResource(EntityStore entities, ObservationStore observations, RelationshipStore relationships,
-                  StagingStore staging, IngestService ingest, PipelineService pipeline, CaseStore caseStore) {
+                  StagingStore staging, IngestService ingest, PipelineService pipeline, CaseStore caseStore,
+                  HousekeepingStore housekeepingStore, HousekeepingService housekeeping) {
         this.entities = entities;
         this.observations = observations;
         this.relationships = relationships;
@@ -58,6 +64,8 @@ public class PagesResource {
         this.ingest = ingest;
         this.pipeline = pipeline;
         this.caseStore = caseStore;
+        this.housekeepingStore = housekeepingStore;
+        this.housekeeping = housekeeping;
     }
 
     // --- rows the templates render ---
@@ -76,6 +84,11 @@ public class PagesResource {
     }
 
     public record RelRow(String kind, long otherId, String otherName) {
+    }
+
+    public record HkRow(long id, String status, String entityNames, List<Long> entityIds,
+                        String evidence, String reasoning, String decidedBy,
+                        String confidencePercent, String createdAt) {
     }
 
     public record ReviewRow(long id, long entityId, String entityName, String attribute, String value,
@@ -103,7 +116,11 @@ public class PagesResource {
                                                     List<SourceDocument> docs, int pendingCount);
 
         public static native TemplateInstance entity(Entity entity, List<AttrGroup> groups,
-                                                     List<RelRow> rels, int pendingCount);
+                                                     List<RelRow> rels, List<HkRow> hkRecords,
+                                                     int pendingCount);
+
+        public static native TemplateInstance housekeeping(List<HkRow> open, List<HkRow> decided,
+                                                           int pendingCount);
 
         public static native TemplateInstance review(List<ReviewRow> rows, int pendingCount);
 
@@ -139,8 +156,12 @@ public class PagesResource {
 
     @GET
     @Path("entity/{id}")
-    public TemplateInstance entity(@PathParam("id") long id) {
+    public Response entity(@PathParam("id") long id) {
         Entity entity = entities.byId(id).orElseThrow(NotFoundException::new);
+        if (entity.isMerged()) {
+            // The entity was folded into another; its page lives on at the survivor.
+            return Response.seeOther(URI.create("/entity/" + entity.mergedInto())).build();
+        }
         Map<String, List<ObsRow>> grouped = new LinkedHashMap<>();
         for (Observation o : observations.forEntity(id)) {
             grouped.computeIfAbsent(o.attribute(), k -> new ArrayList<>())
@@ -155,7 +176,41 @@ public class PagesResource {
             entities.byId(r.toEntity()).ifPresent(other ->
                     rels.add(new RelRow(r.kind().replace('_', ' '), other.id(), other.displayName())));
         }
-        return Templates.entity(entity, groups, rels, pendingCount());
+        List<HkRow> hkRecords = housekeepingStore.forEntity(id).stream().map(this::toHkRow).toList();
+        return Response.ok(Templates.entity(entity, groups, rels, hkRecords, pendingCount())).build();
+    }
+
+    @GET
+    @Path("housekeeping")
+    public TemplateInstance housekeeping() {
+        List<HkRow> open = new ArrayList<>();
+        List<HkRow> decided = new ArrayList<>();
+        for (HousekeepingRecord r : housekeepingStore.listAll()) {
+            (r.status() == com.edtice.crm.domain.HousekeepingStatus.OPEN ? open : decided).add(toHkRow(r));
+        }
+        return Templates.housekeeping(open, decided, pendingCount());
+    }
+
+    @POST
+    @Path("housekeeping/{id}/merge")
+    public Response housekeepingMerge(@PathParam("id") long id, @FormParam("note") String note) {
+        housekeeping.decideManually(id, true, note);
+        return Response.seeOther(URI.create("/housekeeping")).build();
+    }
+
+    @POST
+    @Path("housekeeping/{id}/keep")
+    public Response housekeepingKeep(@PathParam("id") long id, @FormParam("note") String note) {
+        housekeeping.decideManually(id, false, note);
+        return Response.seeOther(URI.create("/housekeeping")).build();
+    }
+
+    private HkRow toHkRow(HousekeepingRecord r) {
+        String names = r.entityIds().stream()
+                .map(eid -> entities.byId(eid).map(Entity::displayName).orElse("#" + eid))
+                .reduce((x, y) -> x + "  ↔  " + y).orElse("");
+        return new HkRow(r.id(), r.status().db(), names, r.entityIds(), r.evidence(), r.reasoning(),
+                r.decidedBy() == null ? "" : r.decidedBy(), r.confidencePercent(), TS.format(r.createdAt()));
     }
 
     @GET

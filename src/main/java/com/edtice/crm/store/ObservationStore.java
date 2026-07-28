@@ -25,4 +25,7 @@ public interface ObservationStore {
     boolean duplicateExists(long entityId, String attribute, String value);
 
     void setStatus(long id, ObservationStatus status);
+
+    /** When this entity last gained an observation — used to decide whether a settled housekeeping question has new evidence. */
+    java.util.Optional<java.time.Instant> latestObservedAt(long entityId);
 }

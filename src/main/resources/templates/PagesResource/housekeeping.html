@@ -1,0 +1,62 @@
+{#include base}
+{#title}Housekeeping — Customer Success CRM{/title}
+
+<div class="card">
+  <h1>Data housekeeping</h1>
+  <p class="muted">Every possible-duplicate deliberation is recorded here permanently — evidence,
+    reasoning, and outcome — whether the decision was to merge or to keep entities separate.
+    Settled questions are only reopened when new evidence arrives.</p>
+</div>
+
+<div class="card">
+  <h2>Awaiting your decision</h2>
+  {#if open.isEmpty()}
+  <p class="muted">Nothing needs review. The agent decides clear-cut pairs itself; borderline ones land here.</p>
+  {#else}
+  {#for r in open}
+  <div style="border:1px solid var(--border); border-radius:8px; padding:0.9rem 1rem; margin-bottom:0.9rem;">
+    <p style="margin:0 0 0.4rem"><strong>
+      {#for eid in r.entityIds}{#if eid_index > 0} &nbsp;↔&nbsp; {/if}<a href="/entity/{eid}">{eid}</a>{/for}
+      &nbsp;{r.entityNames}</strong>
+      <span class="muted">(model confidence {r.confidencePercent}, {r.createdAt})</span></p>
+    <p style="margin:0.2rem 0"><span class="muted">Evidence:</span> {r.evidence}</p>
+    <p style="margin:0.2rem 0"><span class="muted">Reasoning so far:</span> {r.reasoning}</p>
+    <div style="display:flex; gap:0.6rem; margin-top:0.6rem; align-items:center;">
+      <form class="inline" method="post" action="/housekeeping/{r.id}/merge" style="display:flex; gap:0.5rem; flex:1">
+        <input type="text" name="note" placeholder="Optional decision note (recorded permanently)" style="flex:1">
+        <button type="submit">Merge</button>
+      </form>
+      <form class="inline" method="post" action="/housekeeping/{r.id}/keep">
+        <button class="ghost" type="submit">Keep separate</button>
+      </form>
+    </div>
+  </div>
+  {/for}
+  {/if}
+</div>
+
+<div class="card">
+  <h2>Decision history</h2>
+  {#if decided.isEmpty()}
+  <p class="muted">No decisions recorded yet.</p>
+  {#else}
+  <table>
+    <tr><th>Entities</th><th>Decision</th><th>By</th><th>Confidence</th><th>Evidence &amp; reasoning</th><th>When</th></tr>
+    {#for r in decided}
+    <tr>
+      <td>{#for eid in r.entityIds}{#if eid_index > 0} ↔ {/if}<a href="/entity/{eid}">{eid}</a>{/for} {r.entityNames}</td>
+      <td><span class="pill {r.status}">{r.status}</span></td>
+      <td>{r.decidedBy}</td>
+      <td>{r.confidencePercent}</td>
+      <td>
+        <div class="evidence">{r.evidence}</div>
+        <div>{r.reasoning}</div>
+      </td>
+      <td class="muted">{r.createdAt}</td>
+    </tr>
+    {/for}
+  </table>
+  {/if}
+</div>
+
+{/include}

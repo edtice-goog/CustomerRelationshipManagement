@@ -145,6 +145,25 @@ public class JdbcObservationStore implements ObservationStore {
         });
     }
 
+    @Override
+    public Optional<Instant> latestObservedAt(long entityId) {
+        return db.with(c -> {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT MAX(observed_at) FROM observations WHERE entity_id = ?")) {
+                ps.setLong(1, entityId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String max = rs.getString(1);
+                        if (max != null) {
+                            return Optional.of(Instant.parse(max));
+                        }
+                    }
+                    return Optional.empty();
+                }
+            }
+        });
+    }
+
     private static List<Observation> mapAll(ResultSet rs) throws SQLException {
         List<Observation> out = new ArrayList<>();
         while (rs.next()) {

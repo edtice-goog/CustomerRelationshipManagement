@@ -14,6 +14,12 @@ public interface Extractor {
     CaseStatus assessCase(SupportCase supportCase, List<SourceDocument> history, ApiCredentials credentials);
 
     /**
+     * Judge whether two entity profiles refer to the same real-world entity.
+     * priorHistory carries earlier housekeeping deliberations for this pair (may be empty).
+     */
+    MergeVerdict judgeMerge(String profileA, String profileB, String priorHistory, ApiCredentials credentials);
+
+    /**
      * Cheap connectivity check (no tokens billed). Returns a human-readable detail
      * string on success; throws with a useful message on failure.
      */

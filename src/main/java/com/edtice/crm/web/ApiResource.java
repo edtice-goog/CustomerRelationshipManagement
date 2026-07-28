@@ -4,9 +4,14 @@ import com.edtice.crm.cases.CaseService;
 import com.edtice.crm.domain.CaseAssessment;
 import com.edtice.crm.domain.SourceDocument;
 import com.edtice.crm.domain.SupportCase;
+import com.edtice.crm.domain.HousekeepingRecord;
+import com.edtice.crm.domain.HousekeepingStatus;
 import com.edtice.crm.extract.ApiCredentials;
 import com.edtice.crm.extract.Extractor;
+import com.edtice.crm.housekeeping.HousekeepingService;
 import com.edtice.crm.ingest.IngestService;
+import com.edtice.crm.store.EntityStore;
+import com.edtice.crm.store.HousekeepingStore;
 import com.edtice.crm.pipeline.PipelineService;
 import com.edtice.crm.store.CaseStore;
 import com.edtice.crm.store.StagingStore;
@@ -40,15 +45,23 @@ public class ApiResource {
     private final PipelineService pipeline;
     private final CaseService caseService;
     private final CaseStore caseStore;
+    private final HousekeepingService housekeeping;
+    private final HousekeepingStore housekeepingStore;
+    private final EntityStore entities;
 
     ApiResource(Extractor extractor, IngestService ingest, StagingStore staging,
-                PipelineService pipeline, CaseService caseService, CaseStore caseStore) {
+                PipelineService pipeline, CaseService caseService, CaseStore caseStore,
+                HousekeepingService housekeeping, HousekeepingStore housekeepingStore,
+                EntityStore entities) {
         this.extractor = extractor;
         this.ingest = ingest;
         this.staging = staging;
         this.pipeline = pipeline;
         this.caseService = caseService;
         this.caseStore = caseStore;
+        this.housekeeping = housekeeping;
+        this.housekeepingStore = housekeepingStore;
+        this.entities = entities;
     }
 
     // --- request/response shapes ---
@@ -245,6 +258,88 @@ public class ApiResource {
         pipeline.submit(doc.id(), ClaudeConfig.orNull(config));
         return Response.accepted(new IngestResponse(doc.id(), "processing", false, "Re-extraction queued",
                 caseService.infoFor(doc.rawContent()).map(CaseInfoDto::of).orElse(null))).build();
+    }
+
+    // --- housekeeping ---
+
+    public record EntityRef(long id, String name, boolean merged) {
+    }
+
+    public record HousekeepingDto(long id, String kind, String status, String evidence, String reasoning,
+                                  String decidedBy, double confidence, Long priorRecordId,
+                                  Instant createdAt, Instant decidedAt,
+                                  java.util.List<EntityRef> entities) {
+    }
+
+    public record SweepResultDto(int candidatePairs, int merged, int keptSeparate, int openForReview, int skipped) {
+    }
+
+    public record DecideRequest(
+            @Schema(description = "'merge' to fold the two entities together, 'keep_separate' to record they are distinct.", required = true)
+            String action,
+            @Schema(description = "Optional note appended to the record's reasoning.")
+            String note) {
+    }
+
+    private HousekeepingDto toDto(HousekeepingRecord r) {
+        java.util.List<EntityRef> refs = r.entityIds().stream()
+                .map(id -> entities.byId(id)
+                        .map(e -> new EntityRef(e.id(), e.displayName(), e.isMerged()))
+                        .orElse(new EntityRef(id, "?", false)))
+                .toList();
+        return new HousekeepingDto(r.id(), r.kind(), r.status().db(), r.evidence(), r.reasoning(),
+                r.decidedBy(), r.confidence(), r.priorRecordId(), r.createdAt(), r.decidedAt(), refs);
+    }
+
+    @GET
+    @Path("housekeeping")
+    @Operation(summary = "List housekeeping records",
+            description = "The durable history of data-hygiene deliberations (entity merges considered, "
+                    + "with evidence and reasoning either way). Filter with ?status=open|merged|kept_separate.")
+    public java.util.List<HousekeepingDto> housekeepingRecords(@jakarta.ws.rs.QueryParam("status") String status) {
+        java.util.List<HousekeepingRecord> list = status == null || status.isBlank()
+                ? housekeepingStore.listAll()
+                : housekeepingStore.byStatus(HousekeepingStatus.fromDb(status));
+        return list.stream().map(this::toDto).toList();
+    }
+
+    @POST
+    @Path("housekeeping/run")
+    @Operation(summary = "Run a housekeeping sweep now",
+            description = "Compares all entities pairwise for likely duplicates and deliberates on each "
+                    + "candidate pair (evidence, verdict, reasoning — recorded either way). Also runs on a "
+                    + "schedule and opportunistically on ingestion. Synchronous; may take a while when "
+                    + "there are many candidate pairs. Optionally supply Claude credentials in the body.")
+    public Response runHousekeeping(ClaudeConfig config) {
+        try {
+            HousekeepingService.SweepResult r = housekeeping.sweep(ClaudeConfig.orNull(config));
+            return Response.ok(new SweepResultDto(r.candidatePairs(), r.merged(), r.keptSeparate(),
+                    r.openForReview(), r.skipped())).build();
+        } catch (Exception e) {
+            return Response.status(Response.Status.BAD_GATEWAY)
+                    .entity(new TestResult(false, rootMessage(e))).build();
+        }
+    }
+
+    @POST
+    @Path("housekeeping/{id}/decide")
+    @Operation(summary = "Decide an open housekeeping record",
+            description = "Human decision on a pair the agent left open: merge or keep_separate. "
+                    + "The decision and optional note become part of the permanent record.")
+    public Response decideHousekeeping(@PathParam("id") long id, DecideRequest request) {
+        if (request == null || request.action() == null
+                || !java.util.Set.of("merge", "keep_separate").contains(request.action())) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(new TestResult(false, "action must be 'merge' or 'keep_separate'")).build();
+        }
+        try {
+            HousekeepingRecord decided = housekeeping.decideManually(id, "merge".equals(request.action()),
+                    request.note());
+            return Response.ok(toDto(decided)).build();
+        } catch (IllegalStateException e) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(new TestResult(false, e.getMessage())).build();
+        }
     }
 
     private static String rootMessage(Throwable t) {

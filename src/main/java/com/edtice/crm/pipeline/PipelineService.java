@@ -9,6 +9,7 @@ import com.edtice.crm.domain.SourceDocument;
 import com.edtice.crm.extract.ApiCredentials;
 import com.edtice.crm.extract.Extractor;
 import com.edtice.crm.extract.MessageAnalysis;
+import com.edtice.crm.housekeeping.HousekeepingService;
 import com.edtice.crm.store.EntityStore;
 import com.edtice.crm.store.ObservationStore;
 import com.edtice.crm.store.RelationshipStore;
@@ -18,7 +19,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,6 +43,7 @@ public class PipelineService {
     private final RelationshipStore relationships;
     private final Extractor extractor;
     private final CaseService caseService;
+    private final HousekeepingService housekeeping;
     private final double autoPromoteThreshold;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
@@ -50,6 +54,7 @@ public class PipelineService {
 
     PipelineService(StagingStore staging, EntityStore entities, ObservationStore observations,
                     RelationshipStore relationships, Extractor extractor, CaseService caseService,
+                    HousekeepingService housekeeping,
                     @ConfigProperty(name = "crm.autoPromoteThreshold") double autoPromoteThreshold) {
         this.staging = staging;
         this.entities = entities;
@@ -57,6 +62,7 @@ public class PipelineService {
         this.relationships = relationships;
         this.extractor = extractor;
         this.caseService = caseService;
+        this.housekeeping = housekeeping;
         this.autoPromoteThreshold = autoPromoteThreshold;
     }
 
@@ -95,6 +101,7 @@ public class PipelineService {
         staging.setStatus(docId, DocStatus.PROCESSING, null);
 
         MessageAnalysis analysis = extractor.analyze(doc, jobCredentials.get(docId));
+        List<Entity> createdEntities = new ArrayList<>();
 
         // Organizations first so people can link to them.
         if (analysis.organizations() != null) {
@@ -102,7 +109,7 @@ public class PipelineService {
                 if (isBlank(org.name())) {
                     continue;
                 }
-                Entity orgEntity = resolveOrCreate(Entity.ORGANIZATION, org.name());
+                Entity orgEntity = resolveOrCreate(Entity.ORGANIZATION, org.name(), createdEntities);
                 record(orgEntity.id(), "website", org.website(), org.confidence(), org.evidence(), docId);
             }
         }
@@ -115,7 +122,7 @@ public class PipelineService {
                 if (isBlank(person.fullName()) && isBlank(person.email())) {
                     continue;
                 }
-                Entity personEntity = resolvePerson(person);
+                Entity personEntity = resolvePerson(person, createdEntities);
                 if (!isBlank(person.fullName())) {
                     peopleByName.putIfAbsent(person.fullName().toLowerCase(), personEntity.id());
                 }
@@ -129,7 +136,7 @@ public class PipelineService {
                 record(personEntity.id(), "address", person.address(), person.confidence(), person.evidence(), docId);
 
                 if (!isBlank(person.company())) {
-                    Entity orgEntity = resolveOrCreate(Entity.ORGANIZATION, person.company());
+                    Entity orgEntity = resolveOrCreate(Entity.ORGANIZATION, person.company(), createdEntities);
                     relationships.ensure(personEntity.id(), orgEntity.id(), Relationship.WORKS_AT, docId);
                 }
 
@@ -178,6 +185,18 @@ public class PipelineService {
             }
         }
 
+        // Opportunistic housekeeping: any entity created by this document is checked
+        // against similarly named existing entities. Non-fatal — hygiene must never
+        // sink the extraction itself.
+        for (Entity created : createdEntities) {
+            try {
+                housekeeping.checkNewEntity(created, jobCredentials.get(docId));
+            } catch (Exception e) {
+                LOG.warnf(e, "Housekeeping check failed for new entity '%s' (document %d)",
+                        created.displayName(), docId);
+            }
+        }
+
         // If this email belongs to a tracked support case, recalculate the case
         // status from the full history so the current assessment is always on hand.
         try {
@@ -199,7 +218,7 @@ public class PipelineService {
                 analysis.commitments() == null ? 0 : analysis.commitments().size());
     }
 
-    private Entity resolvePerson(MessageAnalysis.ExtractedPerson person) {
+    private Entity resolvePerson(MessageAnalysis.ExtractedPerson person, List<Entity> createdSink) {
         // Email is the strongest identity signal; fall back to name matching.
         if (!isBlank(person.email())) {
             Optional<Long> byEmail = observations.entityIdByAttributeValue("email", person.email());
@@ -208,12 +227,16 @@ public class PipelineService {
             }
         }
         String name = isBlank(person.fullName()) ? person.email() : person.fullName();
-        return resolveOrCreate(Entity.PERSON, name);
+        return resolveOrCreate(Entity.PERSON, name, createdSink);
     }
 
-    private Entity resolveOrCreate(String kind, String displayName) {
+    private Entity resolveOrCreate(String kind, String displayName, List<Entity> createdSink) {
         return entities.findByName(kind, displayName)
-                .orElseGet(() -> entities.create(kind, displayName));
+                .orElseGet(() -> {
+                    Entity created = entities.create(kind, displayName);
+                    createdSink.add(created);
+                    return created;
+                });
     }
 
     private void record(long entityId, String attribute, String value, double confidence,
