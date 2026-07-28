@@ -230,7 +230,7 @@ public class ApiResource {
     }
 
     public record CommitmentDto(long observationId, long owedByEntityId, String owedByName, String value,
-                                boolean implicit, Long sourceDocId) {
+                                String status, boolean implicit, Long sourceDocId) {
     }
 
     public record ActivitySummaryDto(long id, String kind, String state, String label, String token,
@@ -255,10 +255,30 @@ public class ApiResource {
         return observations.commitmentsForActivity(activityId).stream()
                 .map(o -> new CommitmentDto(o.id(), o.entityId(),
                         entities.byId(o.entityId()).map(e -> e.displayName()).orElse("?"),
-                        o.value(),
-                        o.evidence() != null && o.evidence().startsWith("(implicit"),
+                        o.value(), o.status().name().toLowerCase(),
+                        ActivityService.isImplicit(o),
                         o.sourceDocId()))
                 .toList();
+    }
+
+    @POST
+    @Path("commitments/{id}/fulfill")
+    @Operation(summary = "Manually mark a commitment fulfilled",
+            description = "For commitments handled outside email, e.g. on a phone call. Per the next-step "
+                    + "rule, fulfilling the last active commitment on an open activity immediately generates "
+                    + "a fresh implicit commitment to set the next step.")
+    public Response fulfillCommitment(@PathParam("id") long id) {
+        try {
+            activityService.fulfillCommitment(id);
+            Observation o = observations.byId(id).orElseThrow(NotFoundException::new);
+            return Response.ok(new CommitmentDto(o.id(), o.entityId(),
+                    entities.byId(o.entityId()).map(e -> e.displayName()).orElse("?"),
+                    o.value(), o.status().name().toLowerCase(),
+                    ActivityService.isImplicit(o), o.sourceDocId())).build();
+        } catch (IllegalStateException e) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(new TestResult(false, e.getMessage())).build();
+        }
     }
 
     @GET
@@ -304,7 +324,10 @@ public class ApiResource {
 
     @POST
     @Path("activities/{id}/close")
-    @Operation(summary = "Close an activity", description = "Closed activities are exempt from the next-step rule.")
+    @Operation(summary = "Mark an activity complete",
+            description = "Unconditional for now. Retires the activity's open implicit commitments (a closed "
+                    + "activity needs no next step); real extracted promises stay active. A future restriction "
+                    + "may keep evaluations open until their opportunity is won or lost.")
     public ActivitySummaryDto closeActivity(@PathParam("id") long id) {
         activities.byId(id).orElseThrow(NotFoundException::new);
         activityService.close(id);

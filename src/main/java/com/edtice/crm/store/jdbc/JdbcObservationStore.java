@@ -174,8 +174,25 @@ public class JdbcObservationStore implements ObservationStore {
         return db.with(c -> {
             try (PreparedStatement ps = c.prepareStatement(
                     "SELECT " + COLS + " FROM observations WHERE activity_id = ? AND attribute = ? "
-                            + "AND status = ? ORDER BY observed_at DESC, id DESC")) {
+                            + "AND status IN (?, ?) ORDER BY observed_at DESC, id DESC")) {
                 ps.setLong(1, activityId);
+                ps.setString(2, Observation.COMMITMENT);
+                ps.setString(3, ObservationStatus.ACTIVE.db());
+                ps.setString(4, ObservationStatus.FULFILLED.db());
+                try (ResultSet rs = ps.executeQuery()) {
+                    return mapAll(rs);
+                }
+            }
+        });
+    }
+
+    @Override
+    public List<Observation> activeCommitmentsForEntity(long entityId) {
+        return db.with(c -> {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT " + COLS + " FROM observations WHERE entity_id = ? AND attribute = ? "
+                            + "AND status = ? ORDER BY observed_at DESC, id DESC")) {
+                ps.setLong(1, entityId);
                 ps.setString(2, Observation.COMMITMENT);
                 ps.setString(3, ObservationStatus.ACTIVE.db());
                 try (ResultSet rs = ps.executeQuery()) {

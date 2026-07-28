@@ -117,7 +117,7 @@ public class PagesResource {
     }
 
     public record CommitmentRow(long id, String owedByName, long owedByEntityId, String value,
-                                boolean implicit, Long sourceDocId) {
+                                String status, boolean implicit, Long sourceDocId) {
     }
 
     @CheckedTemplate
@@ -222,8 +222,8 @@ public class PagesResource {
         List<CommitmentRow> commitments = observations.commitmentsForActivity(id).stream()
                 .map(o -> new CommitmentRow(o.id(),
                         entities.byId(o.entityId()).map(Entity::displayName).orElse("?"),
-                        o.entityId(), o.value(),
-                        o.evidence() != null && o.evidence().startsWith("(implicit"),
+                        o.entityId(), o.value(), o.status().name().toLowerCase(),
+                        ActivityService.isImplicit(o),
                         o.sourceDocId()))
                 .toList();
         return Templates.activityDetail(a, anchor, current, history, commitments,
@@ -290,6 +290,13 @@ public class PagesResource {
     public Response reprocess(@PathParam("id") long id) {
         pipeline.submit(id);
         return Response.seeOther(URI.create("/")).build();
+    }
+
+    @POST
+    @Path("commitment/{id}/fulfill")
+    public Response fulfillCommitment(@PathParam("id") long id, @FormParam("back") Long backActivityId) {
+        activityService.fulfillCommitment(id);
+        return Response.seeOther(URI.create(backActivityId == null ? "/" : "/activity/" + backActivityId)).build();
     }
 
     @POST

@@ -57,12 +57,21 @@
     will be generated automatically.</p>
   {#else}
   <table>
-    <tr><th>Owed by</th><th>Commitment</th><th>Source</th></tr>
+    <tr><th>Owed by</th><th>Commitment</th><th>Status</th><th>Source</th><th></th></tr>
     {#for cm in commitments}
     <tr>
       <td><a href="/entity/{cm.owedByEntityId}">{cm.owedByName}</a></td>
       <td>{cm.value} {#if cm.implicit}<span class="pill open">implicit</span>{/if}</td>
+      <td><span class="pill {cm.status}">{cm.status}</span></td>
       <td>{#if cm.sourceDocId}<a href="/source/{cm.sourceDocId}">source #{cm.sourceDocId}</a>{#else}<span class="muted">next-step rule</span>{/if}</td>
+      <td>
+        {#if cm.status == 'active'}
+        <form class="inline" method="post" action="/commitment/{cm.id}/fulfill">
+          <input type="hidden" name="back" value="{activity.id}">
+          <button class="ghost" type="submit" title="Mark fulfilled, e.g. handled by phone">Fulfilled</button>
+        </form>
+        {/if}
+      </td>
     </tr>
     {/for}
   </table>

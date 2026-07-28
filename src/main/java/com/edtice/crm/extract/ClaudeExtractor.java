@@ -97,6 +97,19 @@ public class ClaudeExtractor implements Extractor {
             - Be direct, and make the summary a one-read catch-up with a clear next step.
             """;
 
+    private static final String FULFILLMENT_PROMPT = """
+            You check whether a communication fulfills any of a list of outstanding commitments.
+
+            Rules:
+            - Mark a commitment fulfilled ONLY when the communication shows the promised thing was actually
+              delivered, completed, or done — an attachment sent, results shared, a fix confirmed, a meeting
+              that happened.
+            - A commitment merely being mentioned, re-promised, rescheduled, or apologized for is NOT fulfillment.
+            - Partial delivery is not fulfillment unless the communication treats the commitment as satisfied.
+            - Use the commitment ids exactly as given. If nothing is fulfilled, return an empty list.
+            - evidence must be a short verbatim quote demonstrating the fulfillment.
+            """;
+
     private static final String MERGE_PROMPT = """
             You are the data-housekeeping agent for a CRM. Decide whether two entity records refer to the
             same real-world person or organization.
@@ -237,6 +250,33 @@ public class ClaudeExtractor implements Extractor {
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
                         "Assessment returned no structured content (stop_reason=" + response.stopReason() + ")"));
+    }
+
+    @Override
+    public FulfillmentResult checkFulfillment(SourceDocument doc, String candidatesText,
+                                              ApiCredentials credentials) {
+        String userMessage = "Outstanding commitments:\n" + candidatesText
+                + "\n--- COMMUNICATION START ---\n"
+                + doc.rawContent()
+                + "\n--- COMMUNICATION END ---\n"
+                + "Which of the outstanding commitments, if any, does this communication fulfill?";
+
+        StructuredMessageCreateParams<FulfillmentResult> params = MessageCreateParams.builder()
+                .model(model)
+                .maxTokens(16000L)
+                .system(FULFILLMENT_PROMPT)
+                .outputConfig(FulfillmentResult.class)
+                .addUserMessage(userMessage)
+                .build();
+
+        var response = clientFor(credentials).messages().create(params);
+
+        return response.content().stream()
+                .flatMap(block -> block.text().stream())
+                .map(typed -> typed.text())
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Fulfillment check returned no structured content (stop_reason=" + response.stopReason() + ")"));
     }
 
     @Override

@@ -4,7 +4,9 @@ public enum ObservationStatus {
     PENDING_REVIEW,
     ACTIVE,
     REJECTED,
-    SUPERSEDED;
+    SUPERSEDED,
+    /** Commitment lifecycle: the promised thing was delivered (detected or manually marked). */
+    FULFILLED;
 
     public String db() {
         return name().toLowerCase();

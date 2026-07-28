@@ -30,9 +30,12 @@ public interface ObservationStore {
     /** When this entity last gained an observation — used to decide whether a settled housekeeping question has new evidence. */
     Optional<Instant> latestObservedAt(long entityId);
 
-    /** Active commitment observations linked to an activity, newest first. */
+    /** Commitment observations linked to an activity (active and fulfilled), newest first. */
     List<Observation> commitmentsForActivity(long activityId);
 
     /** True when the activity has at least one active commitment — its "next step". */
     boolean activeCommitmentExists(long activityId);
+
+    /** Active commitments owed by an entity, newest first — fulfillment-check candidates. */
+    List<Observation> activeCommitmentsForEntity(long entityId);
 }

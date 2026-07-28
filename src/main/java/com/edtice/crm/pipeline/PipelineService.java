@@ -4,11 +4,13 @@ import com.edtice.crm.activities.ActivityService;
 import com.edtice.crm.domain.Activity;
 import com.edtice.crm.domain.DocStatus;
 import com.edtice.crm.domain.Entity;
+import com.edtice.crm.domain.Observation;
 import com.edtice.crm.domain.ObservationStatus;
 import com.edtice.crm.domain.Relationship;
 import com.edtice.crm.domain.SourceDocument;
 import com.edtice.crm.extract.ApiCredentials;
 import com.edtice.crm.extract.Extractor;
+import com.edtice.crm.extract.FulfillmentResult;
 import com.edtice.crm.extract.MessageAnalysis;
 import com.edtice.crm.housekeeping.HousekeepingService;
 import com.edtice.crm.store.EntityStore;
@@ -22,6 +24,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -47,6 +50,7 @@ public class PipelineService {
     private final ActivityService activityService;
     private final HousekeepingService housekeeping;
     private final double autoPromoteThreshold;
+    private final double fulfillmentThreshold;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "extraction-pipeline");
@@ -64,7 +68,8 @@ public class PipelineService {
     PipelineService(StagingStore staging, EntityStore entities, ObservationStore observations,
                     RelationshipStore relationships, Extractor extractor, ActivityService activityService,
                     HousekeepingService housekeeping,
-                    @ConfigProperty(name = "crm.autoPromoteThreshold") double autoPromoteThreshold) {
+                    @ConfigProperty(name = "crm.autoPromoteThreshold") double autoPromoteThreshold,
+                    @ConfigProperty(name = "crm.commitments.fulfillmentThreshold") double fulfillmentThreshold) {
         this.staging = staging;
         this.entities = entities;
         this.observations = observations;
@@ -73,6 +78,7 @@ public class PipelineService {
         this.activityService = activityService;
         this.housekeeping = housekeeping;
         this.autoPromoteThreshold = autoPromoteThreshold;
+        this.fulfillmentThreshold = fulfillmentThreshold;
     }
 
     /** Queue a staged document for background extraction with the server-default credentials. */
@@ -170,6 +176,28 @@ public class PipelineService {
         List<Activity> docActivities = activityService.activitiesForDocument(docId);
         Long commitmentActivityId = docActivities.isEmpty() ? null : docActivities.get(0).id();
 
+        // Gather fulfillment candidates BEFORE recording this document's new
+        // commitments, so a message can't "fulfill" the promise it just made.
+        // Candidates: real (non-implicit) active commitments on this document's
+        // activities, plus active commitments owed by the people in the message.
+        Map<Long, Observation> fulfillmentCandidates = new LinkedHashMap<>();
+        for (Activity activity : docActivities) {
+            for (Observation o : observations.commitmentsForActivity(activity.id())) {
+                if (o.status() == ObservationStatus.ACTIVE && !ActivityService.isImplicit(o)) {
+                    fulfillmentCandidates.putIfAbsent(o.id(), o);
+                }
+            }
+        }
+        for (Long personId : peopleByName.values()) {
+            for (Observation o : observations.activeCommitmentsForEntity(personId)) {
+                if (!ActivityService.isImplicit(o)) {
+                    fulfillmentCandidates.putIfAbsent(o.id(), o);
+                }
+            }
+        }
+
+        boolean realCommitmentRecorded = false;
+
         // Commitments attach to the person who owes them and, when this document
         // belongs to an activity, to that activity — its committed next step.
         if (analysis.commitments() != null) {
@@ -202,6 +230,40 @@ public class PipelineService {
                 }
                 record(owner, "commitment", value.toString(), commitment.confidence(),
                         commitment.evidence(), docId, commitmentActivityId);
+                realCommitmentRecorded = true;
+            }
+        }
+
+        // A real commitment IS the next step — retire the activity's implicit one.
+        if (realCommitmentRecorded && commitmentActivityId != null) {
+            activityService.fulfillImplicitCommitments(commitmentActivityId);
+        }
+
+        // Fulfillment detection: does this communication show any outstanding
+        // commitment was delivered? Non-fatal — detection must not sink extraction.
+        if (!fulfillmentCandidates.isEmpty()) {
+            try {
+                StringBuilder candidates = new StringBuilder();
+                for (Observation o : fulfillmentCandidates.values()) {
+                    String owedBy = entities.byId(o.entityId()).map(Entity::displayName).orElse("?");
+                    candidates.append("id=").append(o.id()).append(" | owed by ").append(owedBy)
+                            .append(": ").append(o.value()).append('\n');
+                }
+                FulfillmentResult result = extractor.checkFulfillment(doc, candidates.toString(),
+                        jobCredentials.get(docId));
+                if (result.fulfilled() != null) {
+                    for (FulfillmentResult.FulfilledCommitment f : result.fulfilled()) {
+                        Observation candidate = fulfillmentCandidates.get(f.commitmentId());
+                        if (candidate == null || f.confidence() < fulfillmentThreshold) {
+                            continue;
+                        }
+                        observations.setStatus(candidate.id(), ObservationStatus.FULFILLED);
+                        LOG.infof("Commitment %d fulfilled by document %d (confidence %.2f): %s",
+                                candidate.id(), docId, f.confidence(), f.evidence());
+                    }
+                }
+            } catch (Exception e) {
+                LOG.warnf(e, "Fulfillment check failed for document %d", docId);
             }
         }
 

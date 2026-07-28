@@ -35,6 +35,12 @@ sentiment, commitments, and support-case status are extracted automatically by C
   gets an implicit commitment — owed by the CRM owner, due immediately — to set a next step.
   Nothing open can silently stall. Extracted commitments from an activity's emails link to
   the activity and satisfy the rule.
+- **Commitment fulfillment**: incoming communications are checked against outstanding
+  commitments ("here are the results…" fulfills "I'll follow up with results") — model-judged,
+  threshold-gated. Commitments can also be fulfilled manually (handled by phone). A real
+  commitment recorded on an activity deterministically fulfills its implicit one; fulfilling
+  the last active commitment on an open activity regenerates the implicit next step. Marking
+  an activity complete retires its implicit commitments; real promises outlive the activity.
 - **Generic opportunity anchors** (deliberately not opportunity management): a GUID plus
   external-system metadata, or a local key-value attribute bag for users without an external
   system. Activities link to opportunities; anything richer belongs in a real opportunity
