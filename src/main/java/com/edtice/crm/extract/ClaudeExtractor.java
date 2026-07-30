@@ -2,20 +2,24 @@ package com.edtice.crm.extract;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
-import com.anthropic.models.messages.MessageCountTokensParams;
 import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.StructuredMessageCreateParams;
 import com.edtice.crm.domain.Activity;
 import com.edtice.crm.domain.SourceDocument;
 import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 @Singleton
 public class ClaudeExtractor implements Extractor {
+
+    private static final Logger LOG = Logger.getLogger(ClaudeExtractor.class);
 
     private static final String SYSTEM_PROMPT = """
             You extract structured CRM data from customer communications (emails, chat messages, notes).
@@ -127,11 +131,33 @@ public class ClaudeExtractor implements Extractor {
             - evidenceStatement is facts only; reasoning is where you draw the conclusion.
             """;
 
-    private final String model;
+    /**
+     * Ordered list of models to try. Populated from the (comma-separated)
+     * {@code crm.extraction.model} property — first entry is preferred, later
+     * entries are fallbacks used when the primary is unavailable on the current
+     * endpoint (e.g. a proxy like LiteLLM that hasn't published the newest
+     * model yet). Fixed for the JVM lifetime.
+     */
+    private final List<String> models;
+
+    /**
+     * Last model we successfully called, if any. Tried first on the next call
+     * so we don't repeatedly probe an unavailable primary. Volatile because
+     * background extraction and connectivity probes may race.
+     */
+    private volatile String cachedModel;
+
     private final ConcurrentHashMap<String, AnthropicClient> clients = new ConcurrentHashMap<>();
 
-    ClaudeExtractor(@ConfigProperty(name = "crm.extraction.model") String model) {
-        this.model = model;
+    ClaudeExtractor(@ConfigProperty(name = "crm.extraction.model") String modelSpec) {
+        this.models = Arrays.stream(modelSpec.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
+        if (this.models.isEmpty()) {
+            throw new IllegalStateException(
+                    "crm.extraction.model must list at least one model name");
+        }
     }
 
     private AnthropicClient clientFor(ApiCredentials credentials) {
@@ -164,19 +190,93 @@ public class ClaudeExtractor implements Extractor {
         }
     }
 
+    /**
+     * Run {@code attempt} against the preferred model, falling back to the
+     * next model in {@link #models} if the endpoint reports the model as
+     * unavailable. On success, remembers the working model so subsequent calls
+     * skip the failed primary. Non-model-related failures propagate immediately.
+     */
+    private <T> T withModelFallback(Function<String, T> attempt) {
+        // Fast path: try the last-known-good model first.
+        String cached = cachedModel;
+        if (cached != null) {
+            try {
+                return attempt.apply(cached);
+            } catch (RuntimeException e) {
+                if (!isModelNotAvailable(e)) throw e;
+                LOG.warnf("Cached model '%s' no longer available (%s); rescanning list.",
+                        cached, e.getMessage());
+                cachedModel = null;
+            }
+        }
+        // Slow path: iterate the configured list from the top.
+        RuntimeException lastFailure = null;
+        for (String candidate : models) {
+            try {
+                T result = attempt.apply(candidate);
+                cachedModel = candidate;
+                if (!candidate.equals(models.get(0))) {
+                    LOG.warnf("Primary model '%s' unavailable; using fallback '%s'.",
+                            models.get(0), candidate);
+                }
+                return result;
+            } catch (RuntimeException e) {
+                if (isModelNotAvailable(e)) {
+                    LOG.warnf("Model '%s' not available: %s", candidate, e.getMessage());
+                    lastFailure = e;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw lastFailure != null ? lastFailure
+                : new IllegalStateException("No models configured — check crm.extraction.model");
+    }
+
+    /**
+     * Best-effort match for "the endpoint told us this model doesn't exist here."
+     * LiteLLM says {@code "Invalid model name passed in model=..."}; Anthropic
+     * native returns {@code not_found_error} with a similar message. We match
+     * broadly (model + one of invalid/not-found/unavailable/unknown) and walk
+     * the cause chain since SDKs wrap the underlying HTTP error.
+     */
+    private static boolean isModelNotAvailable(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String msg = t.getMessage();
+            if (msg == null || msg.isEmpty()) continue;
+            String lower = msg.toLowerCase();
+            if (lower.contains("model") && (
+                    lower.contains("invalid")
+                            || lower.contains("not found")
+                            || lower.contains("not_found")
+                            || lower.contains("unavailable")
+                            || lower.contains("does not exist")
+                            || lower.contains("unknown"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     public String verifyConnectivity(ApiCredentials credentials) {
-        // count_tokens hits the real endpoint with real auth but bills nothing.
-        long tokens = clientFor(credentials).messages().countTokens(
-                MessageCountTokensParams.builder()
-                        .model(model)
-                        .addUserMessage("connectivity check")
-                        .build())
-                .inputTokens();
-        return "Connected. Model '" + model + "' reachable"
+        // A 1-output-token messages.create is the smallest call that actually
+        // exercises the model. We can't use count_tokens for this: LiteLLM (and
+        // some other proxies) implement it with a local tokenizer and never
+        // validate the model against the account, so it would happily report
+        // a nonexistent model as reachable.
+        withModelFallback(m -> {
+            MessageCreateParams params = MessageCreateParams.builder()
+                    .model(m)
+                    .maxTokens(1L)
+                    .addUserMessage("Reply with 'ok'.")
+                    .build();
+            return clientFor(credentials).messages().create(params);
+        });
+        return "Connected. Model '" + cachedModel + "' reachable"
                 + (credentials != null && credentials.baseUrl() != null && !credentials.baseUrl().isBlank()
                         ? " via " + credentials.baseUrl() : "")
-                + " (test prompt = " + tokens + " tokens).";
+                + ".";
     }
 
     @Override
@@ -188,15 +288,16 @@ public class ClaudeExtractor implements Extractor {
                 + doc.rawContent()
                 + "\n--- COMMUNICATION END ---";
 
-        StructuredMessageCreateParams<MessageAnalysis> params = MessageCreateParams.builder()
-                .model(model)
-                .maxTokens(16000L)
-                .system(SYSTEM_PROMPT)
-                .outputConfig(MessageAnalysis.class)
-                .addUserMessage(userMessage)
-                .build();
-
-        var response = clientFor(credentials).messages().create(params);
+        var response = withModelFallback(m -> {
+            StructuredMessageCreateParams<MessageAnalysis> params = MessageCreateParams.builder()
+                    .model(m)
+                    .maxTokens(16000L)
+                    .system(SYSTEM_PROMPT)
+                    .outputConfig(MessageAnalysis.class)
+                    .addUserMessage(userMessage)
+                    .build();
+            return clientFor(credentials).messages().create(params);
+        });
 
         Optional<MessageAnalysis> result = response.content().stream()
                 .flatMap(block -> block.text().stream())
@@ -234,15 +335,16 @@ public class ClaudeExtractor implements Extractor {
                 .append(activity.kindLabel().toLowerCase())
                 .append(" as of the most recent communication.");
 
-        StructuredMessageCreateParams<AssessmentResult> params = MessageCreateParams.builder()
-                .model(model)
-                .maxTokens(16000L)
-                .system(prompt)
-                .outputConfig(AssessmentResult.class)
-                .addUserMessage(thread.toString())
-                .build();
-
-        var response = clientFor(credentials).messages().create(params);
+        var response = withModelFallback(m -> {
+            StructuredMessageCreateParams<AssessmentResult> params = MessageCreateParams.builder()
+                    .model(m)
+                    .maxTokens(16000L)
+                    .system(prompt)
+                    .outputConfig(AssessmentResult.class)
+                    .addUserMessage(thread.toString())
+                    .build();
+            return clientFor(credentials).messages().create(params);
+        });
 
         return response.content().stream()
                 .flatMap(block -> block.text().stream())
@@ -261,15 +363,16 @@ public class ClaudeExtractor implements Extractor {
                 + "\n--- COMMUNICATION END ---\n"
                 + "Which of the outstanding commitments, if any, does this communication fulfill?";
 
-        StructuredMessageCreateParams<FulfillmentResult> params = MessageCreateParams.builder()
-                .model(model)
-                .maxTokens(16000L)
-                .system(FULFILLMENT_PROMPT)
-                .outputConfig(FulfillmentResult.class)
-                .addUserMessage(userMessage)
-                .build();
-
-        var response = clientFor(credentials).messages().create(params);
+        var response = withModelFallback(m -> {
+            StructuredMessageCreateParams<FulfillmentResult> params = MessageCreateParams.builder()
+                    .model(m)
+                    .maxTokens(16000L)
+                    .system(FULFILLMENT_PROMPT)
+                    .outputConfig(FulfillmentResult.class)
+                    .addUserMessage(userMessage)
+                    .build();
+            return clientFor(credentials).messages().create(params);
+        });
 
         return response.content().stream()
                 .flatMap(block -> block.text().stream())
@@ -289,15 +392,16 @@ public class ClaudeExtractor implements Extractor {
                         ? "No prior housekeeping decisions exist for this pair.\n"
                         : "===== PRIOR HOUSEKEEPING DECISIONS FOR THIS PAIR =====\n" + priorHistory + "\n");
 
-        StructuredMessageCreateParams<MergeVerdict> params = MessageCreateParams.builder()
-                .model(model)
-                .maxTokens(16000L)
-                .system(MERGE_PROMPT)
-                .outputConfig(MergeVerdict.class)
-                .addUserMessage(userMessage)
-                .build();
-
-        var response = clientFor(credentials).messages().create(params);
+        var response = withModelFallback(m -> {
+            StructuredMessageCreateParams<MergeVerdict> params = MessageCreateParams.builder()
+                    .model(m)
+                    .maxTokens(16000L)
+                    .system(MERGE_PROMPT)
+                    .outputConfig(MergeVerdict.class)
+                    .addUserMessage(userMessage)
+                    .build();
+            return clientFor(credentials).messages().create(params);
+        });
 
         return response.content().stream()
                 .flatMap(block -> block.text().stream())
